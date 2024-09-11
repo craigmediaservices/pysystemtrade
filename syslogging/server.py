@@ -6,6 +6,10 @@ import os
 import socketserver
 import sys
 
+print("PYTHONPATH:", os.environ.get('PYTHONPATH'))
+print("PATH:", os.environ.get('PATH'))
+print("sys.path:", sys.path)
+
 from syslogging.logger import LOG_FORMAT
 from syslogging.handlers import LogRecordStreamHandler, MostRecentHandler
 
