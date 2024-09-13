@@ -659,14 +659,18 @@ def get_trading_hours_for_all_instruments(data=arg_not_supplied):
     p = progressBar(len(list_of_instruments))
     all_trading_hours = {}
     for instrument_code in list_of_instruments:
+        print(f"Processing instrument: {instrument_code}")  # Log current instrument
         p.iterate()
         try:
             trading_hours = get_trading_hours_for_instrument(data, instrument_code)
         except missingContract:
-            print("*** NO TRADING HOURS FOR %s ***" % instrument_code)
+            print(f"*** NO TRADING HOURS FOR {instrument_code} ***")
+            continue
+        except missingData:
+            print(f"*** MISSING DATA FOR {instrument_code}, skipping ***")
             continue
 
-        ## will have several days use first one
+        # Use the first available trading day
         check_trading_hours(trading_hours, instrument_code)
         all_trading_hours[instrument_code] = trading_hours
 
