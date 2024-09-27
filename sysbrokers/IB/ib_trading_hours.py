@@ -30,9 +30,6 @@ def get_trading_hours_from_contract_details(
         time_zone_id = ib_contract_details.timeZoneId
         time_zone_adjustment = get_time_difference(time_zone_id)
 
-        # Print the raw trading hours string from IB
-        print(f"Trading hours for {ib_contract_details.contract.symbol}: {ib_contract_details.tradingHours}")
-
         trading_hours_string = ib_contract_details.tradingHours
         list_of_open_times = parse_trading_hours_string(
             trading_hours_string, adjustment_hours=time_zone_adjustment
