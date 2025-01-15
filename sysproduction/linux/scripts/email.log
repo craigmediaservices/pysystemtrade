@@ -1,0 +1,54 @@
+********************************************************************************
+Email stored not sent on 2024-06-25 14:39:04.219666: Price Spike GAS_US_mini
+
+To reduce email load, won't send any more emails with this subject today. Use 'interactive_diagnostics', 'Emails' to see stored messages
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-06-25 14:39:04.224029: Price Spike GAS_US_mini
+
+Spike found in prices for GAS_US_mini/20241100: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-06-25 20:47:22.010333: Price Spike GAS_US_mini
+
+Spike found in prices for GAS_US_mini/20241100: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-07-03 10:23:35.457678: Price Spike MILKDRY
+
+Spike found in prices for MILKDRY/20250300: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-07-03 10:32:36.330875: Price Spike NIKKEI400
+
+Spike found in prices for NIKKEI400/20241200: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-07-05 10:14:40.444751: Price Spike MILKDRY
+
+Spike found in prices for MILKDRY/20250300: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-07-05 10:23:34.692150: Price Spike NIKKEI400
+
+Spike found in prices for NIKKEI400/20241200: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-07-05 20:23:03.629027: Price Spike MILKDRY
+
+Spike found in prices for MILKDRY/20250300: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
+********************************************************************************
+Email stored not sent on 2024-07-05 20:34:50.462412: Price Spike NIKKEI400
+
+Spike found in prices for NIKKEI400/20241200: need to manually check by running interactive_manual_check_historical_prices
+********************************************************************************
+
