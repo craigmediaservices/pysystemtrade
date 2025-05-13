@@ -108,9 +108,6 @@ def pd_readcsv(
 
     df = pd.read_csv(filename, skiprows=skiprows, skipfooter=skipfooter)
 
-    # Debugging: Print first few rows to check date column before conversion
-    print(f"DEBUG: Last few rows of {filename} before date parsing:\n", df.tail())
-
     ## Add time index as index
     try:
         df = add_datetime_index(
