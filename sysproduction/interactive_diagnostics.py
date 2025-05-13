@@ -672,6 +672,9 @@ def get_trading_hours_for_all_instruments(data=arg_not_supplied):
         except missingContract:
             print("*** NO TRADING HOURS FOR %s ***" % instrument_code)
             continue
+        except missingData:
+            print(f"*** MISSING DATA FOR %s ***" % instrument_code)
+            continue
 
         ## will have several days use first one
         check_trading_hours(trading_hours, instrument_code)

@@ -57,22 +57,49 @@ class ibContractsClient(ibClient):
 
         return contract_dates
 
+    # def broker_get_single_contract_expiry_date(
+    #     self,
+    #     futures_contract_with_ib_data: futuresContract,
+    #     allow_expired: bool = False,
+    # ) -> str:
+    #     """
+    #     Return the exact expiry date for a given contract
+
+    #     :param futures_contract_with_ib_data:  contract where instrument has ib metadata
+    #     :return: YYYYMMDD str
+    #     """
+    #     log_attrs = {**futures_contract_with_ib_data.log_attributes(), "method": "temp"}
+    #     if futures_contract_with_ib_data.is_spread_contract():
+    #         self.log.warning(
+    #             "Can only find expiry for single leg contract!", **log_attrs
+    #         )
+    #         raise missingContract
+
+    #     try:
+    #         ibcontract = self.ib_futures_contract(
+    #             futures_contract_with_ib_data,
+    #             allow_expired=allow_expired,
+    #             always_return_single_leg=True,
+    #         )
+    #     except missingContract:
+    #         self.log.warning("Contract is missing can't get expiry", **log_attrs)
+    #         raise missingContract
+
+    #     expiry_date = ibcontract.lastTradeDateOrContractMonth
+    #     expiry_date = expiry_date[:8]  ## in case of weird '... GB format'
+
+    #     return expiry_date
+
     def broker_get_single_contract_expiry_date(
         self,
         futures_contract_with_ib_data: futuresContract,
         allow_expired: bool = False,
     ) -> str:
-        """
-        Return the exact expiry date for a given contract
-
-        :param futures_contract_with_ib_data:  contract where instrument has ib metadata
-        :return: YYYYMMDD str
-        """
         log_attrs = {**futures_contract_with_ib_data.log_attributes(), "method": "temp"}
+        self.log.debug(f"Processing contract: {futures_contract_with_ib_data}", **log_attrs)
+        
         if futures_contract_with_ib_data.is_spread_contract():
-            self.log.warning(
-                "Can only find expiry for single leg contract!", **log_attrs
-            )
+            self.log.warning("Can only find expiry for single leg contract!", **log_attrs)
             raise missingContract
 
         try:
@@ -81,12 +108,15 @@ class ibContractsClient(ibClient):
                 allow_expired=allow_expired,
                 always_return_single_leg=True,
             )
+            self.log.debug(f"IB contract: {ibcontract}", **log_attrs)
         except missingContract:
             self.log.warning("Contract is missing can't get expiry", **log_attrs)
             raise missingContract
 
         expiry_date = ibcontract.lastTradeDateOrContractMonth
+        self.log.debug(f"Original expiry: {expiry_date}", **log_attrs)
         expiry_date = expiry_date[:8]  ## in case of weird '... GB format'
+        self.log.debug(f"Truncated expiry: {expiry_date}", **log_attrs)
 
         return expiry_date
 
