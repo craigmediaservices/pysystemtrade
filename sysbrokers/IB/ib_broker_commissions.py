@@ -12,6 +12,8 @@ from syslogging.logger import *
 from syscore.genutils import quickTimer
 from sysobjects.spot_fx_prices import currencyValue
 
+# Fixing commissions
+from sysbrokers.IB.ib_connection import get_broker_account
 
 class ibFuturesContractCommissionData(brokerFuturesContractCommissionData):
     """
@@ -48,8 +50,16 @@ class ibFuturesContractCommissionData(brokerFuturesContractCommissionData):
         instrument_code = futures_contract.instrument_code
         contract_date = futures_contract.contract_date.list_of_date_str[0]
 
+        # Get the broker account for what-if orders (needed to avoid Error 435)
+        try:
+            account = get_broker_account()
+        except Exception as e:
+            self.log.warning(f"Could not get broker account: {e}")
+            account = ""
+
         broker_order = brokerOrder(
-            test_commission_strategy, instrument_code, contract_date, size_of_test_trade
+            test_commission_strategy, instrument_code, contract_date, size_of_test_trade,
+            broker_account=account
         )
 
         order = self.execution_stack.what_if_order(broker_order)
@@ -61,7 +71,7 @@ class ibFuturesContractCommissionData(brokerFuturesContractCommissionData):
                 comm_currency_value = get_commission_and_currency_from_ib_order(order)
             except:
                 continue
-
+                
         return comm_currency_value
 
 
@@ -75,4 +85,4 @@ def get_commission_and_currency_from_ib_order(
 
 
 test_commission_strategy = "testCommmission"  ## whatever not put on stack
-size_of_test_trade = 10  ## arbitrary
+size_of_test_trade = 1  ## arbitrary
