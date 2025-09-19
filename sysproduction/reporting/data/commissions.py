@@ -166,6 +166,10 @@ def update_valid_costs(
 
 
 def create_df_in_commission_report(some_dict: dict):
+    if not some_dict:
+        # Return empty DataFrame with correct columns to prevent pandas ValueError
+        return pd.DataFrame(columns=[CONFIGURED_COLUMN, BROKER_COLUMN, DIFF_COLUMN])
+
     some_df = pd.DataFrame(some_dict)
     some_df = some_df.transpose()
     some_df.columns = [CONFIGURED_COLUMN, BROKER_COLUMN, DIFF_COLUMN]
