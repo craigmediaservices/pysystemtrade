@@ -1,0 +1,3 @@
+#!/bin/bash
+. ~/.profile
+. p sysproduction.reporting.fx_balance_report.fx_balance_report

@@ -1,0 +1,3 @@
+#!/bin/bash
+. ~/.profile
+. p sysproduction.interactive_fx_sweep.interactive_fx_sweep
