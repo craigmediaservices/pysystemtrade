@@ -151,6 +151,12 @@ fx_balance_report_config = reportConfig(
     output="email",
 )
 
+bond_ladder_report_config = reportConfig(
+    title="T-bill ladder report",
+    function="sysproduction.reporting.bond_ladder_report.bond_ladder_report",
+    output="email",
+)
+
 ## The reports will be run in this order
 report_config_defaults = dict(
     slippage_report=slippage_report_config,
@@ -171,4 +177,5 @@ report_config_defaults = dict(
     account_curve_report=account_curve_report_config,
     commission_report=commission_report_config,
     fx_balance_report=fx_balance_report_config,
+    bond_ladder_report=bond_ladder_report_config,
 )
