@@ -14,6 +14,10 @@ from sysproduction.data.currency_data import dataCurrency
 
 DEFAULT_FX_BALANCE_ALERT_THRESHOLD = 10000.0
 
+# IB reports a pseudo-currency "BASE" in TotalCashBalance holding the account
+# total in base currency - it isn't a real currency balance, so drop it.
+_PSEUDO_CURRENCIES = ("BASE", "")
+
 
 def get_fx_balance_alert_threshold(data: dataBlob) -> float:
     """
@@ -43,6 +47,8 @@ def get_fx_balances_as_df(data: dataBlob) -> pd.DataFrame:
 
     rows = []
     for currency, value in raw_balances.items():
+        if currency in _PSEUDO_CURRENCIES:
+            continue
         value = float(value)
         if currency == base_currency:
             fx_rate = 1.0

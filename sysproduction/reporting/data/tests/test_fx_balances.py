@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
 
+from sysproduction.reporting.data import fx_balances
 from sysproduction.reporting.data.fx_balances import (
     get_fx_sweep_suggestions,
     get_fx_balance_alert_threshold,
+    get_fx_balances_as_df,
     DEFAULT_FX_BALANCE_ALERT_THRESHOLD,
 )
 
@@ -82,3 +84,32 @@ def test_nan_base_value_skipped():
     df = _balances_df([("XYZ", 100000.0, np.nan, np.nan)])
     out = get_fx_sweep_suggestions(df, base_currency="USD", threshold=10000.0)
     assert len(out) == 0
+
+
+def test_get_fx_balances_as_df_drops_pseudo_currencies(monkeypatch):
+    # IB returns a "BASE" pseudo-currency holding the account total - drop it
+    class _FakeBroker:
+        def __init__(self, data):
+            pass
+
+        def broker_fx_balances(self):
+            return {"USD": "1000", "EUR": "500", "BASE": "1588", "": "0"}
+
+    class _FakeCurrency:
+        def __init__(self, data):
+            pass
+
+        def get_base_currency(self):
+            return "USD"
+
+        def get_last_fx_rate_to_base(self, currency):
+            return {"EUR": 1.1}[currency]
+
+    monkeypatch.setattr(fx_balances, "dataBroker", _FakeBroker)
+    monkeypatch.setattr(fx_balances, "dataCurrency", _FakeCurrency)
+
+    df = get_fx_balances_as_df(data=None)
+    assert "BASE" not in df.index
+    assert "" not in df.index
+    assert set(df.index) == {"USD", "EUR"}
+    assert df.loc["EUR", "base_value"] == 550.0
