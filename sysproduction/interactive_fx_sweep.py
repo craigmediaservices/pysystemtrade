@@ -6,7 +6,7 @@ This is a thin wrapper around the existing broker FX plumbing:
  - market sweeps go through dataBroker.broker_fx_market_order() (same path as
    interactive_order_stack -> create FX trade)
  - limit-at-bid/ask sweeps are placed directly via the IB connection
-   (ib_insync LimitOrder) so no changes to the core broker code are needed
+   (ib_async LimitOrder) so no changes to the core broker code are needed
 
 Nothing is ever placed without an explicit "Y" confirmation per trade, and
 there's a dry-run mode that just prints what it would do. Manual run only -
@@ -172,8 +172,8 @@ def _place_fx_limit_order(
     Priced at the current bid when selling ccy1, the current ask when buying -
     i.e. a passive order resting on our side of the book.
     """
-    # imported here so the module still imports if ib_insync isn't installed
-    from ib_insync import Forex, LimitOrder
+    # imported here so the module still imports if ib_async isn't installed
+    from ib_async import Forex, LimitOrder
 
     ib = data.ib_conn.ib
 
