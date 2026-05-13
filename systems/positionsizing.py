@@ -129,6 +129,9 @@ class PositionSizing(SystemStage):
         subsystem_position = self._apply_long_only_constraint_to_position(
             position=subsystem_position_raw, instrument_code=instrument_code
         )
+        subsystem_position = self._apply_short_only_constraint_to_position(
+            position=subsystem_position, instrument_code=instrument_code
+        )
 
         return subsystem_position
 
@@ -152,6 +155,27 @@ class PositionSizing(SystemStage):
         config = self.config
         long_only = config.get_element_or_default("long_only_instruments", [])
         return long_only
+
+    def _apply_short_only_constraint_to_position(
+        self, position: pd.Series, instrument_code: str
+    ) -> pd.Series:
+        instrument_short_only = self._is_instrument_short_only(instrument_code)
+        if instrument_short_only:
+            position[position > 0.0] = 0.0
+
+        return position
+
+    @diagnostic()
+    def _is_instrument_short_only(self, instrument_code: str) -> bool:
+        list_of_short_only_instruments = self._get_list_of_short_only_instruments()
+
+        return instrument_code in list_of_short_only_instruments
+
+    @diagnostic()
+    def _get_list_of_short_only_instruments(self) -> list:
+        config = self.config
+        short_only = config.get_element_or_default("short_only_instruments", [])
+        return short_only
 
     def avg_abs_forecast(self) -> float:
         return self.config.average_absolute_forecast

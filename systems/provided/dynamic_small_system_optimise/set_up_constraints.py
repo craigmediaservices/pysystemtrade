@@ -79,6 +79,11 @@ def get_data_and_calculate_for_code(
     else:
         long_only = instrument_code in input_data.long_only_keys
 
+    if input_data.short_only_keys is arg_not_supplied:
+        short_only = False
+    else:
+        short_only = instrument_code in input_data.short_only_keys
+
     max_position = input_data.maximum_position_weight_for_code(instrument_code)
     weight_prior = input_data.prior_weight_for_code(instrument_code)
     optimium_weight = input_data.optimal_weights_for_code(instrument_code)
@@ -90,6 +95,7 @@ def get_data_and_calculate_for_code(
         weight_prior=weight_prior,
         optimium_weight=optimium_weight,
         long_only=long_only,
+        short_only=short_only,
     )
 
     return min_max_and_direction_and_start_for_code
@@ -102,6 +108,7 @@ def calculations_for_code(
     weight_prior: float = arg_not_supplied,
     optimium_weight: float = np.nan,
     long_only: bool = False,
+    short_only: bool = False,
 ):
     minimum, maximum = calculate_minima_and_maxima(
         reduce_only=reduce_only,
@@ -109,6 +116,7 @@ def calculations_for_code(
         max_position=max_position,
         weight_prior=weight_prior,
         long_only=long_only,
+        short_only=short_only,
     )
 
     assert maximum >= minimum
@@ -127,6 +135,7 @@ def calculations_for_code(
 def calculate_minima_and_maxima(
     reduce_only: bool = False,
     long_only: bool = False,
+    short_only: bool = False,
     no_trade: bool = False,
     max_position: float = arg_not_supplied,
     weight_prior: float = arg_not_supplied,
@@ -136,6 +145,9 @@ def calculate_minima_and_maxima(
 
     if long_only:
         minimum = 0.0
+
+    if short_only:
+        maximum = 0.0
 
     if no_trade:
         if weight_prior is not arg_not_supplied:

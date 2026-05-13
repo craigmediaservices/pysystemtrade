@@ -97,6 +97,12 @@ class RollDataWithStateReporting(object):
     relative_volume: float
     absolute_forward_volume: int
     days_until_expiry: int
+    has_orphaned_positions: bool = False
+    orphaned_contract_positions: list = None
+
+    def __post_init__(self):
+        if self.orphaned_contract_positions is None:
+            self.orphaned_contract_positions = []
 
     @property
     def original_roll_status_as_string(self):
@@ -104,6 +110,22 @@ class RollDataWithStateReporting(object):
 
     def display_roll_query_banner(self):
         print(landing_strip(80))
+        if self.has_orphaned_positions:
+            print("")
+            print("*** WARNING: ORPHANED POSITIONS DETECTED ***")
+            print(
+                "Positions exist in contracts that are NOT the current "
+                "priced or forward contract:"
+            )
+            for contract_date, position in self.orphaned_contract_positions:
+                print(
+                    "  Contract %s: position %d" % (contract_date, int(position))
+                )
+            print(
+                "Manual intervention required — do NOT Roll_Adjusted "
+                "until orphaned positions are moved!"
+            )
+            print("")
         print("Current State: %s" % self.original_roll_status)
         print(
             "Current position in priced contract %d (if zero can Roll Adjusted prices)"
@@ -459,11 +481,27 @@ def suggest_roll_state_for_instrument(
 
     if expired_and_auto_rolling_expired and no_position_held:
         ## contract expired so roll regardless of liquidity
+        if roll_data.has_orphaned_positions:
+            print(
+                "*** WARNING: Would auto Roll_Adjusted for %s but orphaned "
+                "positions detected! Requiring manual intervention. ***"
+                % roll_data.instrument_code
+            )
+            _print_orphaned_positions(roll_data)
+            return ASK_FOR_STATE
         return RollState.Roll_Adjusted
 
     if forward_liquid:
         if no_position_held:
             ## liquid forward, with no position
+            if roll_data.has_orphaned_positions:
+                print(
+                    "*** WARNING: Would auto Roll_Adjusted for %s but orphaned "
+                    "positions detected! Requiring manual intervention. ***"
+                    % roll_data.instrument_code
+                )
+                _print_orphaned_positions(roll_data)
+                return ASK_FOR_STATE
             return RollState.Roll_Adjusted
         else:
             ## liquid forward, with position held
@@ -528,6 +566,11 @@ def check_if_expired_and_auto_rolling_expired(
     auto_rolling_expired = auto_parameters.auto_roll_expired
 
     return expired and auto_rolling_expired
+
+
+def _print_orphaned_positions(roll_data: RollDataWithStateReporting):
+    for contract_date, position in roll_data.orphaned_contract_positions:
+        print("  Contract %s: position %d" % (contract_date, int(position)))
 
 
 def warn_not_rolling(instrument_code: str, auto_parameters: autoRollParameters):
@@ -647,10 +690,29 @@ def setup_roll_data_with_state_reporting(
 
     original_roll_status = diag_positions.get_roll_state(instrument_code)
     priced_contract_date = diag_contracts.get_priced_contract_id(instrument_code)
+    forward_contract_date = diag_contracts.get_forward_contract_id(instrument_code)
 
     contract = futuresContract(instrument_code, priced_contract_date)
 
     position_priced_contract = int(diag_positions.get_position_for_contract(contract))
+
+    ## Check for orphaned positions in contracts other than priced/forward
+    contracts_with_positions = (
+        diag_positions.get_list_of_contracts_with_any_contract_position_for_instrument(
+            instrument_code
+        )
+    )
+    known_contracts = {priced_contract_date, forward_contract_date}
+    orphaned_contract_positions = []
+    for contract_date_str in contracts_with_positions:
+        if contract_date_str not in known_contracts:
+            orphan_contract = futuresContract(instrument_code, contract_date_str)
+            orphan_position = diag_positions.get_position_for_contract(orphan_contract)
+            if orphan_position != 0:
+                orphaned_contract_positions.append(
+                    (contract_date_str, orphan_position)
+                )
+    has_orphaned_positions = len(orphaned_contract_positions) > 0
 
     allowable_roll_states = allowable_roll_state_from_current_and_position(
         original_roll_status, position_priced_contract
@@ -679,6 +741,8 @@ def setup_roll_data_with_state_reporting(
         relative_volume=relative_volume,
         absolute_forward_volume=absolute_forward_volume,
         days_until_expiry=days_until_expiry,
+        has_orphaned_positions=has_orphaned_positions,
+        orphaned_contract_positions=orphaned_contract_positions,
     )
 
     return roll_data_with_state
@@ -733,12 +797,56 @@ def roll_state_is_now_no_open(data: dataBlob, instrument_code: str):
     update_overrides.add_temporary_reduce_only_for_instrument(instrument_code)
 
 
+def _check_for_orphaned_positions(data: dataBlob, instrument_code: str) -> list:
+    """Check if any contract positions exist outside the priced/forward contracts."""
+    diag_positions = diagPositions(data)
+    diag_contracts = dataContracts(data)
+
+    priced_contract_date = diag_contracts.get_priced_contract_id(instrument_code)
+    forward_contract_date = diag_contracts.get_forward_contract_id(instrument_code)
+    known_contracts = {priced_contract_date, forward_contract_date}
+
+    contracts_with_positions = (
+        diag_positions.get_list_of_contracts_with_any_contract_position_for_instrument(
+            instrument_code
+        )
+    )
+    orphaned = []
+    for contract_date_str in contracts_with_positions:
+        if contract_date_str not in known_contracts:
+            orphan_contract = futuresContract(instrument_code, contract_date_str)
+            orphan_position = diag_positions.get_position_for_contract(orphan_contract)
+            if orphan_position != 0:
+                orphaned.append((contract_date_str, orphan_position))
+    return orphaned
+
+
 def state_change_to_roll_adjusted_prices(
     data: dataBlob,
     instrument_code: str,
     original_roll_state: RollState,
     confirm_adjusted_price_change: bool = True,
 ):
+    # Check for orphaned positions before rolling
+    orphaned = _check_for_orphaned_positions(data, instrument_code)
+    if len(orphaned) > 0:
+        print("")
+        print("*** WARNING: ORPHANED POSITIONS DETECTED FOR %s ***" % instrument_code)
+        for contract_date, position in orphaned:
+            print("  Contract %s: position %d" % (contract_date, int(position)))
+        print(
+            "Rolling adjusted prices will advance the contract calendar but "
+            "will NOT move these orphaned positions!"
+        )
+        proceed = true_if_answer_is_yes(
+            "Are you SURE you want to Roll_Adjusted despite orphaned positions? y/n"
+        )
+        if not proceed:
+            print("Roll_Adjusted aborted due to orphaned positions.")
+            update_positions = updatePositions(data)
+            update_positions.set_roll_state(instrument_code, original_roll_state)
+            return
+
     # Going to roll adjusted prices
     update_positions = updatePositions(data)
 
