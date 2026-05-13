@@ -94,10 +94,25 @@ confirm the balances came down.
 In `private/private_config.yaml` (gitignored — local only):
 
 ```yaml
-# flag / offer to sweep any non-base (non-USD) balance worth more than this
-# many base-currency units. If this line is absent, defaults to 10000.
+# Alert when a balance's *excess over its margin buffer* exceeds this many
+# base-currency units. Defaults to 10000 if absent.
 fx_balance_alert_threshold: 10000
+
+# Per-currency margin buffer (in base-ccy units). Long balances up to this
+# much are treated as intentional (held to cover variation margin on that
+# currency's futures) and are NOT flagged; only the excess is. Negative
+# balances ignore the buffer (you want to flatten - IB charges debit interest).
+# Omit a currency to give it a 0 buffer (any positive balance over the
+# threshold will be flagged).
+fx_balance_buffers:
+  EUR: 15000
+  # GBP: 5000
+  # CHF: 5000
 ```
+
+The suggested sweep is the **excess only** — the buffer stays intact. The
+report's "Suggested sweeps" table includes `buffer_base` and `excess_base`
+columns so you can see how the trade size was derived.
 
 In `private/private_control_config.yaml`, under `process_configuration_methods:
 run_reports:` (added so the report is emailed nightly):
@@ -118,5 +133,5 @@ run_reports:` (added so the report is emailed nightly):
 | `sysproduction/interactive_fx_sweep.py` | the interactive sweep wrapper |
 | `sysproduction/linux/scripts/fx_balance_report` | PATH launcher for the report |
 | `sysproduction/linux/scripts/interactive_fx_sweep` | PATH launcher for the sweep tool |
-| `private/private_config.yaml` | `fx_balance_alert_threshold` (local, not in git) |
+| `private/private_config.yaml` | `fx_balance_alert_threshold`, `fx_balance_buffers` (local, not in git) |
 | `private/private_control_config.yaml` | adds `fx_balance_report` to `run_reports` (local, not in git) |
