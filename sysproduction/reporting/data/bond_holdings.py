@@ -127,7 +127,7 @@ def get_bond_holdings_df(data: dataBlob) -> pd.DataFrame:
     Columns: cusip, secType, maturity, days_to_maturity, face, mark_price,
              market_value, approx_yield_pct, coupon  (indexed by symbol/cusip)
     """
-    from ib_insync import Contract  # deferred so module imports without IB
+    from ib_async import Contract  # deferred so module imports without IB
 
     ib, portfolio = _portfolio_items(data)
     today = datetime.date.today()
