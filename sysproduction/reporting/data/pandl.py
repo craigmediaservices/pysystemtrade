@@ -20,9 +20,16 @@ from systems.accounts.pandl_calculators.pandl_using_fills import (
 
 
 def get_total_capital_series(data):
+    """
+    Get series of actual capital deployed for trading.
+
+    Returns 'Actual' capital (capital available for trading),
+    NOT 'Max' capital (high water mark). This is the correct denominator
+    for calculating time-weighted returns that reflect trading performance.
+    """
     data_capital_object = dataCapital(data)
 
-    return data_capital_object.get_series_of_maximum_capital()
+    return data_capital_object.total_capital_calculator.get_total_capital()
 
 
 def get_strategy_capital_series(data, strategy_name):

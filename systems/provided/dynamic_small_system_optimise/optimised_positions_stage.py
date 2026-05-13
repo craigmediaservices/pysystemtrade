@@ -136,9 +136,12 @@ class optimisedPositions(SystemStage):
         ## but we use this rather than 'don't trade' for consistency with production
         reduce_only_keys = self.get_reduce_only_instruments()
         long_only_keys = self.get_long_only_instruments()
+        short_only_keys = self.get_short_only_instruments()
 
         return constraintsForDynamicOpt(
-            reduce_only_keys=reduce_only_keys, long_only_keys=long_only_keys
+            reduce_only_keys=reduce_only_keys,
+            long_only_keys=long_only_keys,
+            short_only_keys=short_only_keys,
         )
 
     def get_reduce_only_instruments(self) -> list:
@@ -150,6 +153,11 @@ class optimisedPositions(SystemStage):
         long_only_keys = self.config.get_element_or_default("long_only_instruments_DO_ONLY", [])  # fmt: skip
 
         return long_only_keys
+
+    def get_short_only_instruments(self) -> list:
+        short_only_keys = self.config.get_element_or_default("short_only_instruments_DO_ONLY", [])  # fmt: skip
+
+        return short_only_keys
 
     def get_speed_control(self):
         small_config = self.config.small_system

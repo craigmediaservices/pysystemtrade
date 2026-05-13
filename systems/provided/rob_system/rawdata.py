@@ -7,12 +7,16 @@ from systems.system_cache import diagnostic, output
 from syscore.dateutils import BUSINESS_DAYS_IN_YEAR
 
 
+# put near top of the file (module scope)
+_UNIVERSE_PRICE_PANEL_CACHE = {}
+    
 class myFuturesRawData(RawData):
     """
     A SubSystem that does futures specific raw data calculations
 
     Name: rawdata
     """
+
 
     @output()
     def skew(self, instrument_code, lookback_days=365):
@@ -293,6 +297,100 @@ class myFuturesRawData(RawData):
         demeaned_value = factor_value - demean_value
 
         return demeaned_value
+
+    @output()
+    def get_rawdata_object(self, instrument_code=None):
+        """
+        Return the rawdata object itself for rules that need direct access.
+        Used by self-contained rules like PCA alpha.
+
+        :param instrument_code: str (ignored, but required for pysystemtrade interface)
+        :return: self (the rawdata object)
+        """
+        return self
+    
+    # Factor analysis methods that need a price panel
+    # ---------------------------------------------------
+    @output()
+    def get_universe_price_panel(self, instrument_code=None) -> pd.DataFrame:
+        """
+        Wide daily price panel on the UNION trading calendar.
+        Columns = instrument codes in the configured trading universe.
+        `instrument_code` is ignored (framework passes it).
+        """
+        import pandas as pd
+
+        # cache key: tie to data object + exact instrument list
+        instruments = list(self.parent.get_instrument_list())
+        cache_key = (id(self.parent.data), tuple(sorted(instruments)))
+
+        # module-level memo (survives per-instrument PST caching)
+        panel = _UNIVERSE_PRICE_PANEL_CACHE.get(cache_key)
+        if panel is not None and not panel.empty:
+            # optional: .copy() to avoid accidental mutation by callers
+            return panel  # or: panel.copy()
+
+        if not instruments:
+            return pd.DataFrame()
+
+        # Build union index across all instrument series
+        idxs = []
+        series_by_instr = {}
+        for instr in instruments:
+            try:
+                s = self.get_daily_prices(instr)
+                if len(s) > 0:
+                    series_by_instr[instr] = s
+                    idxs.append(s.index)
+            except Exception:
+                continue
+
+        if not series_by_instr:
+            return pd.DataFrame()
+
+        # Union calendar + align + ffill
+        union_idx = pd.DatetimeIndex(sorted(set().union(*idxs)))
+        panel = (
+            pd.DataFrame({instr: series_by_instr[instr].reindex(union_idx) for instr in series_by_instr})
+            .sort_index()
+            .ffill()
+        )
+
+        _UNIVERSE_PRICE_PANEL_CACHE[cache_key] = panel
+        return panel
+
+    @output()
+    def get_universe_return_panel(self, instrument_code=None, winsor_abs=1.0):
+        """
+        Wide daily **returns** panel on the UNION trading calendar.
+        Built from get_universe_price_panel() to guarantee coverage.
+        - Treat non-positive prices as missing.
+        - Winsorise returns to kill crazy ticks.
+        """
+        import numpy as np
+        import pandas as pd
+
+        panel = self.get_universe_price_panel()
+        if panel is None or panel.empty:
+            return pd.DataFrame()
+
+        # treat <=0 as missing (futures stitches can go 0/negative)
+        panel = panel.where(panel > 0)
+
+        # simple returns
+#        ret = panel.pct_change()
+        ret = panel.pct_change(fill_method=None)
+
+
+        # winsorise to keep outliers from wrecking conditioning
+        if winsor_abs is not None:
+            ret = ret.clip(-winsor_abs, winsor_abs)
+
+        # if any inf slipped in, nuke to NaN
+        ret = ret.replace([np.inf, -np.inf], np.nan)
+
+        return ret
+
 
 
 if __name__ == "__main__":

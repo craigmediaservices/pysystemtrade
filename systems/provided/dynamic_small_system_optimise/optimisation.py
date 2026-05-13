@@ -28,6 +28,7 @@ class constraintsForDynamicOpt:
     reduce_only_keys: list = arg_not_supplied
     no_trade_keys: list = arg_not_supplied
     long_only_keys: list = arg_not_supplied
+    short_only_keys: list = arg_not_supplied
 
 
 class objectiveFunctionForGreedy:
