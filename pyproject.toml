@@ -85,6 +85,7 @@ testpaths = [
     "sysobjects/tests",
     # "sysquant/estimators",
     "sysquant/optimisation",
+    "sysproduction/reporting/data/tests",
     # "systems",
     # "systems/accounts",
     # "systems/provided",

@@ -145,6 +145,12 @@ account_curve_report_config = reportConfig(
     output="email",
 )
 
+fx_balance_report_config = reportConfig(
+    title="FX balance report",
+    function="sysproduction.reporting.fx_balance_report.fx_balance_report",
+    output="email",
+)
+
 ## The reports will be run in this order
 report_config_defaults = dict(
     slippage_report=slippage_report_config,
@@ -164,4 +170,5 @@ report_config_defaults = dict(
     market_monitor_report=market_monitor_report_config,
     account_curve_report=account_curve_report_config,
     commission_report=commission_report_config,
+    fx_balance_report=fx_balance_report_config,
 )
