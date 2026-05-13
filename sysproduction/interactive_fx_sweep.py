@@ -30,6 +30,7 @@ from sysproduction.reporting.data.fx_balances import (
     get_fx_balances_as_df,
     get_fx_sweep_suggestions,
     get_fx_balance_alert_threshold,
+    get_fx_balance_buffers,
 )
 
 # how long to wait for an FX quote when pricing a limit order
@@ -75,7 +76,18 @@ def interactive_fx_sweep(data: dataBlob = arg_not_supplied):
         default_value=default_threshold,
     )
 
-    suggestions_df = get_fx_sweep_suggestions(balances_df, base_currency, threshold)
+    buffers = get_fx_balance_buffers(data)
+    if buffers:
+        print(
+            "Per-currency margin buffers (long balances up to this much are kept intact):"
+        )
+        for ccy, v in sorted(buffers.items()):
+            print("  %s: %s %s" % (ccy, base_currency, format(round(v), ",")))
+        print("")
+
+    suggestions_df = get_fx_sweep_suggestions(
+        balances_df, base_currency, threshold, buffers=buffers
+    )
     if len(suggestions_df) == 0:
         print(
             "\nNothing to do - no non-%s balance exceeds %s %s.\n"

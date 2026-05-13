@@ -5,6 +5,7 @@ from sysproduction.reporting.data import fx_balances
 from sysproduction.reporting.data.fx_balances import (
     get_fx_sweep_suggestions,
     get_fx_balance_alert_threshold,
+    get_fx_balance_buffers,
     get_fx_balances_as_df,
     DEFAULT_FX_BALANCE_ALERT_THRESHOLD,
 )
@@ -84,6 +85,51 @@ def test_nan_base_value_skipped():
     df = _balances_df([("XYZ", 100000.0, np.nan, np.nan)])
     out = get_fx_sweep_suggestions(df, base_currency="USD", threshold=10000.0)
     assert len(out) == 0
+
+
+def test_buffer_suppresses_alert_when_balance_within_buffer():
+    # EUR 14k base value, 15k buffer -> excess -1k, below threshold, no alert
+    df = _balances_df([("EUR", 12278.5, 1.1756, 14434.7)])
+    out = get_fx_sweep_suggestions(
+        df, base_currency="USD", threshold=10000.0, buffers={"EUR": 15000.0}
+    )
+    assert len(out) == 0
+
+
+def test_buffer_only_excess_is_swept():
+    # EUR 30k base value, 15k buffer -> excess 15k. Sweep the excess only.
+    df = _balances_df([("EUR", 25517.0, 1.1756, 30000.0)])
+    out = get_fx_sweep_suggestions(
+        df, base_currency="USD", threshold=10000.0, buffers={"EUR": 15000.0}
+    )
+    assert list(out.index) == ["EUR"]
+    row = out.loc["EUR"]
+    assert row["buffer_base"] == 15000.0
+    assert abs(row["excess_base"] - 15000.0) < 1e-6
+    # excess_ccy = 15000 / 1.1756 ~= 12759 ; trade_qty = -12759
+    assert abs(row["approx_trade_qty"] - (-12759)) <= 1
+
+
+def test_buffer_ignored_for_negative_balance():
+    # short balance is flagged even if you've set a buffer for that ccy
+    df = _balances_df([("EUR", -15000.0, 1.1, -16500.0)])
+    out = get_fx_sweep_suggestions(
+        df, base_currency="USD", threshold=10000.0, buffers={"EUR": 20000.0}
+    )
+    assert list(out.index) == ["EUR"]
+    row = out.loc["EUR"]
+    assert row["action"] == "BUY"
+    assert row["approx_trade_qty"] == 15000
+
+
+def test_get_fx_balance_buffers_default_empty():
+    assert get_fx_balance_buffers(_FakeData()) == {}
+
+
+def test_get_fx_balance_buffers_from_config():
+    data = _FakeData({"eur": 15000, "GBP": "5000", "bad": "not a number"})
+    out = get_fx_balance_buffers(data)
+    assert out == {"EUR": 15000.0, "GBP": 5000.0}
 
 
 def test_get_fx_balances_as_df_drops_pseudo_currencies(monkeypatch):

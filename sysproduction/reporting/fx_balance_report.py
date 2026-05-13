@@ -9,6 +9,7 @@ from sysproduction.reporting.data.fx_balances import (
     get_fx_balances_as_df,
     get_fx_sweep_suggestions,
     get_fx_balance_alert_threshold,
+    get_fx_balance_buffers,
 )
 
 
@@ -28,8 +29,11 @@ def fx_balance_report(data: dataBlob = arg_not_supplied):
 
     base_currency = currency_data.get_base_currency()
     threshold = get_fx_balance_alert_threshold(data)
+    buffers = get_fx_balance_buffers(data)
     balances_df = get_fx_balances_as_df(data)
-    suggestions_df = get_fx_sweep_suggestions(balances_df, base_currency, threshold)
+    suggestions_df = get_fx_sweep_suggestions(
+        balances_df, base_currency, threshold, buffers=buffers
+    )
 
     try:
         margin_used = data_broker.get_margin_used_in_base_currency()
@@ -52,6 +56,18 @@ def fx_balance_report(data: dataBlob = arg_not_supplied):
             "%s %s." % (base_currency, base_currency, format(round(threshold), ","))
         )
     )
+    if buffers:
+        buffers_text = ", ".join(
+            "%s %s %s" % (ccy, base_currency, format(round(v), ","))
+            for ccy, v in sorted(buffers.items())
+        )
+        formatted_output.append(
+            body_text(
+                "Per-currency margin buffers (config 'fx_balance_buffers'; long "
+                "balances up to this much are treated as intentional and not "
+                "flagged): %s." % buffers_text
+            )
+        )
     formatted_output.append(body_text(margin_text))
 
     formatted_output.append(table("Broker cash balances by currency", balances_df))
@@ -66,9 +82,11 @@ def fx_balance_report(data: dataBlob = arg_not_supplied):
     else:
         formatted_output.append(
             body_text(
-                "ACTION REQUIRED: the balances below exceed the alert threshold - "
-                "consider trading them back to %s. Run interactive_fx_sweep (dry-run "
-                "first) or interactive_order_stack -> create FX trade. A negative "
+                "ACTION REQUIRED: the balances below have excess (over their margin "
+                "buffer) larger than the alert threshold - consider trading the "
+                "excess back to %s. Suggested approx_trade_qty is the *excess* only; "
+                "the buffer stays intact. Run interactive_fx_sweep (dry-run first) "
+                "or interactive_order_stack -> create FX trade. A negative "
                 "approx_trade_qty means SELL that currency vs %s."
                 % (base_currency, base_currency)
             )
