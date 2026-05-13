@@ -138,15 +138,29 @@ def get_bond_holdings_df(data: dataBlob) -> pd.DataFrame:
         if contract.secType not in BOND_SEC_TYPES:
             continue
 
-        maturity_date = None
+        # IB stores a bill/bond's maturity in the portfolio contract's
+        # lastTradeDateOrContractMonth (the bond `maturity` field on
+        # ContractDetails is left empty for T-bills).
+        maturity_date = parse_ib_date(
+            getattr(contract, "lastTradeDateOrContractMonth", "")
+        )
         cusip = ""
         coupon = np.nan
         try:
             cds = ib.reqContractDetails(Contract(conId=contract.conId))
             if cds:
                 cd = cds[0]
-                maturity_date = parse_ib_date(getattr(cd, "maturity", None))
-                cusip = getattr(cd, "cusip", "") or ""
+                # If the bond-specific maturity field is populated, prefer it
+                cd_maturity = parse_ib_date(getattr(cd, "maturity", None))
+                if cd_maturity is not None:
+                    maturity_date = cd_maturity
+                # CUSIP/ISIN live in secIdList as TagValue entries; cd.cusip
+                # is IB's internal contract id (e.g. "IBCID826931582"), not a
+                # real CUSIP, so we ignore it.
+                for tv in getattr(cd, "secIdList", None) or []:
+                    if getattr(tv, "tag", "") == "CUSIP":
+                        cusip = tv.value
+                        break
                 coupon = getattr(cd, "coupon", np.nan)
         except BaseException:
             pass
