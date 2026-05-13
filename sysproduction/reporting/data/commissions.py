@@ -1,7 +1,6 @@
 from typing import List, Dict
 
 import pandas as pd
-import numpy as np
 from sysobjects.spot_fx_prices import currencyValue
 from sysproduction.data.instruments import diagInstruments
 from sysproduction.data.broker import dataBroker
@@ -21,28 +20,29 @@ def filter_tradeable_instruments_for_commission_report(
 ) -> List[str]:
     """
     Filter out trading-restricted and stale instruments from commission reporting.
-    Trading-restricted instruments can't be traded so commission accuracy is not relevant.
-    Stale instruments no longer exist so commission data retrieval will fail.
+    Trading-restricted instruments can't be traded so commission accuracy is not
+    relevant. Stale instruments no longer exist so commission data retrieval will fail.
 
     This fixes erroneous "Currency doesn't match" and "One or both missing" errors
     that occurred when the system tried to get broker commission data for instruments
-    with trading restrictions, regulatory blocks, permission issues, or that are delisted.
+    with trading restrictions, regulatory blocks, or permission issues.
     """
     trading_restricted = get_list_of_untradeable_instruments_in_config(data.config)
     stale_instruments = data.config.get_element_or_default("stale_instruments", [])
 
     exclude_list = list(set(trading_restricted + stale_instruments))
     tradeable_instruments = [
-        instrument for instrument in instrument_list
-        if instrument not in exclude_list
+        instrument for instrument in instrument_list if instrument not in exclude_list
     ]
 
-    if len(exclude_list) > 0:
-        filtered_count = len(instrument_list) - len(tradeable_instruments)
+    if exclude_list:
         restricted_count = len([i for i in instrument_list if i in trading_restricted])
         stale_count = len([i for i in instrument_list if i in stale_instruments])
-        print(f"Commission report: Analyzing {len(tradeable_instruments)} tradeable instruments "
-              f"({restricted_count} trading-restricted, {stale_count} stale instruments skipped)")
+        data.log.debug(
+            "Commission report: Analyzing %d tradeable instruments "
+            "(%d trading-restricted, %d stale instruments skipped)"
+            % (len(tradeable_instruments), restricted_count, stale_count)
+        )
 
     return tradeable_instruments
 
@@ -61,7 +61,6 @@ def df_of_configure_and_broker_block_cost_sorted_by_diff(
 ) -> pd.DataFrame:
     list_of_instrument_codes = get_instrument_list(data)
 
-    # Filter out trading-restricted instruments to prevent erroneous "Currency doesn't match" errors
     list_of_instrument_codes = filter_tradeable_instruments_for_commission_report(
         data, list_of_instrument_codes
     )
@@ -167,7 +166,6 @@ def update_valid_costs(
 
 def create_df_in_commission_report(some_dict: dict):
     if not some_dict:
-        # Return empty DataFrame with correct columns to prevent pandas ValueError
         return pd.DataFrame(columns=[CONFIGURED_COLUMN, BROKER_COLUMN, DIFF_COLUMN])
 
     some_df = pd.DataFrame(some_dict)
