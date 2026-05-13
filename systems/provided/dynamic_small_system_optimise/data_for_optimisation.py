@@ -17,7 +17,9 @@ class dataForOptimisation(object):
         self.costs = obj_instance.costs
 
         if obj_instance.constraints is arg_not_supplied:
-            long_only_keys = reduce_only_keys = no_trade_keys = short_only_keys = arg_not_supplied
+            long_only_keys = (
+                reduce_only_keys
+            ) = no_trade_keys = short_only_keys = arg_not_supplied
 
         else:
             no_trade_keys = obj_instance.constraints.no_trade_keys

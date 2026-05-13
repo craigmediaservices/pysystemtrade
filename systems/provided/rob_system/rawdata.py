@@ -9,14 +9,14 @@ from syscore.dateutils import BUSINESS_DAYS_IN_YEAR
 
 # put near top of the file (module scope)
 _UNIVERSE_PRICE_PANEL_CACHE = {}
-    
+
+
 class myFuturesRawData(RawData):
     """
     A SubSystem that does futures specific raw data calculations
 
     Name: rawdata
     """
-
 
     @output()
     def skew(self, instrument_code, lookback_days=365):
@@ -308,7 +308,7 @@ class myFuturesRawData(RawData):
         :return: self (the rawdata object)
         """
         return self
-    
+
     # Factor analysis methods that need a price panel
     # ---------------------------------------------------
     @output()
@@ -351,7 +351,12 @@ class myFuturesRawData(RawData):
         # Union calendar + align + ffill
         union_idx = pd.DatetimeIndex(sorted(set().union(*idxs)))
         panel = (
-            pd.DataFrame({instr: series_by_instr[instr].reindex(union_idx) for instr in series_by_instr})
+            pd.DataFrame(
+                {
+                    instr: series_by_instr[instr].reindex(union_idx)
+                    for instr in series_by_instr
+                }
+            )
             .sort_index()
             .ffill()
         )
@@ -378,9 +383,8 @@ class myFuturesRawData(RawData):
         panel = panel.where(panel > 0)
 
         # simple returns
-#        ret = panel.pct_change()
+        #        ret = panel.pct_change()
         ret = panel.pct_change(fill_method=None)
-
 
         # winsorise to keep outliers from wrecking conditioning
         if winsor_abs is not None:
@@ -390,7 +394,6 @@ class myFuturesRawData(RawData):
         ret = ret.replace([np.inf, -np.inf], np.nan)
 
         return ret
-
 
 
 if __name__ == "__main__":

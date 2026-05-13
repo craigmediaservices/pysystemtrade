@@ -618,53 +618,73 @@ class ibContractsClient(ibClient):
         :param ibcontract_pattern: ibContract which may not fully specify the contract
         :return: list of ibContracts
         """
-        
+
         # Log the input pattern
-        self.log.debug(f"Requesting contract chain for pattern: {ibcontract_pattern.symbol} "
-                    f"secType={ibcontract_pattern.secType} exchange={ibcontract_pattern.exchange}")
-        
+        self.log.debug(
+            f"Requesting contract chain for pattern: {ibcontract_pattern.symbol} "
+            f"secType={ibcontract_pattern.secType} exchange={ibcontract_pattern.exchange}"
+        )
+
         try:
             new_contract_details_list = self.get_contract_details(
                 ibcontract_pattern,
                 allow_expired=allow_expired,
                 allow_multiple_contracts=True,
             )
-            
+
             # Log what we got back
-            self.log.debug(f"Retrieved {len(new_contract_details_list)} contract details")
-            
+            self.log.debug(
+                f"Retrieved {len(new_contract_details_list)} contract details"
+            )
+
         except Exception as e:
-            self.log.warning(f"Failed to get contract details for {ibcontract_pattern.symbol}: {e}")
+            self.log.warning(
+                f"Failed to get contract details for {ibcontract_pattern.symbol}: {e}"
+            )
             if "expiry date/time format is invalid" in str(e):
-                self.log.warning(f"Date format error detected for {ibcontract_pattern.symbol}")
+                self.log.warning(
+                    f"Date format error detected for {ibcontract_pattern.symbol}"
+                )
             raise
-        
+
         ibcontract_list = [
             contract_details.contract for contract_details in new_contract_details_list
         ]
-        
+
         # Log the final contracts and their dates
         if ibcontract_list:
-            dates = [getattr(c, 'lastTradeDateOrContractMonth', 'NO_DATE') for c in ibcontract_list]
-            self.log.debug(f"Final contract list for {ibcontract_pattern.symbol}: {len(ibcontract_list)} contracts")
+            dates = [
+                getattr(c, "lastTradeDateOrContractMonth", "NO_DATE")
+                for c in ibcontract_list
+            ]
+            self.log.debug(
+                f"Final contract list for {ibcontract_pattern.symbol}: {len(ibcontract_list)} contracts"
+            )
             self.log.debug(f"Contract dates: {dates}")
-            
+
             # Check for malformed dates and FIX THEM
-            malformed_dates = [d for d in dates if d != 'NO_DATE' and ' ' in str(d)]
+            malformed_dates = [d for d in dates if d != "NO_DATE" and " " in str(d)]
             if malformed_dates:
-                self.log.warning(f"Found malformed dates in {ibcontract_pattern.symbol}: {malformed_dates}")
-                
+                self.log.warning(
+                    f"Found malformed dates in {ibcontract_pattern.symbol}: {malformed_dates}"
+                )
+
                 # **FIX THE ACTUAL CONTRACT OBJECTS**
                 for contract in ibcontract_list:
-                    if hasattr(contract, 'lastTradeDateOrContractMonth') and contract.lastTradeDateOrContractMonth:
+                    if (
+                        hasattr(contract, "lastTradeDateOrContractMonth")
+                        and contract.lastTradeDateOrContractMonth
+                    ):
                         original_date = contract.lastTradeDateOrContractMonth
-                        if ' ' in original_date:
+                        if " " in original_date:
                             # Clean "20250917 16:35:00 GB" -> "20250917"
                             cleaned_date = original_date.split()[0][:8]
                             contract.lastTradeDateOrContractMonth = cleaned_date
-                            self.log.debug(f"FIXED contract date from '{original_date}' to '{cleaned_date}'")
-                
+                            self.log.debug(
+                                f"FIXED contract date from '{original_date}' to '{cleaned_date}'"
+                            )
+
         else:
             self.log.warning(f"No contracts found for {ibcontract_pattern.symbol}")
-        
+
         return ibcontract_list

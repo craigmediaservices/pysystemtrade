@@ -118,9 +118,7 @@ class RollDataWithStateReporting(object):
                 "priced or forward contract:"
             )
             for contract_date, position in self.orphaned_contract_positions:
-                print(
-                    "  Contract %s: position %d" % (contract_date, int(position))
-                )
+                print("  Contract %s: position %d" % (contract_date, int(position)))
             print(
                 "Manual intervention required — do NOT Roll_Adjusted "
                 "until orphaned positions are moved!"
@@ -709,9 +707,7 @@ def setup_roll_data_with_state_reporting(
             orphan_contract = futuresContract(instrument_code, contract_date_str)
             orphan_position = diag_positions.get_position_for_contract(orphan_contract)
             if orphan_position != 0:
-                orphaned_contract_positions.append(
-                    (contract_date_str, orphan_position)
-                )
+                orphaned_contract_positions.append((contract_date_str, orphan_position))
     has_orphaned_positions = len(orphaned_contract_positions) > 0
 
     allowable_roll_states = allowable_roll_state_from_current_and_position(

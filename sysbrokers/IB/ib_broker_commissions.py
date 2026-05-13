@@ -62,7 +62,7 @@ class ibFuturesContractCommissionData(brokerFuturesContractCommissionData):
                 comm_currency_value = get_commission_and_currency_from_ib_order(order)
             except:
                 continue
-                
+
         return comm_currency_value
 
 
