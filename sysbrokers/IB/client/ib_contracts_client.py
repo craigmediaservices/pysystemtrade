@@ -1,5 +1,5 @@
 from copy import copy
-from ib_insync import Contract
+from ib_async import Contract
 
 from syscore.cache import Cache
 from syscore.exceptions import missingData, missingContract
@@ -85,20 +85,12 @@ class ibContractsClient(ibClient):
             self.log.warning("Contract is missing can't get expiry", **log_attrs)
             raise missingContract
 
-        # expiry_date = ibcontract.lastTradeDateOrContractMonth
-        # expiry_date = expiry_date[:8]  ## in case of weird '... GB format'
-
-        # return expiry_date
-
         expiry_date = ibcontract.lastTradeDateOrContractMonth
-        # DEBUG: Log the actual malformed date format
-        if len(expiry_date) > 8:
-            print(f"DEBUG - Raw malformed date: '{expiry_date}' for contract {futures_contract_with_ib_data.key}")
-        # Clean malformed date: "20250917 16:35:00 GB" -> "202509"
-        if ' ' in expiry_date:
-            expiry_date = expiry_date.split()[0]  # "20250917 16:35:00 GB" -> "20250917"
-        expiry_date = expiry_date[:8] # Ensure exactly 8 characters (YYYYMMDD)
-        print(f"DEBUG - Cleaned date: '{expiry_date}'")
+        if " " in expiry_date:
+            # IB sometimes returns "YYYYMMDD HH:MM:SS TZ" instead of "YYYYMMDD"
+            expiry_date = expiry_date.split()[0]
+        expiry_date = expiry_date[:8]
+
         return expiry_date
 
     def ib_get_trading_hours(
