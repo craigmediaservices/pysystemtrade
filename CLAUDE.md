@@ -67,7 +67,7 @@ The codebase follows a modular architecture with clear separation of concerns:
 - **systems**: Trading system components (forecasting, portfolio, risk, accounts)
 - **sysexecution**: Order execution and trade management
 - **sysproduction**: Live trading processes and automation
-- **sysbrokers**: Broker interfaces (primarily Interactive Brokers via ib-insync)
+- **sysbrokers**: Broker interfaces (primarily Interactive Brokers via ib_async)
 
 ### Key Design Patterns
 - **Data abstraction**: Uniform interfaces for different data sources (CSV for backtesting, MongoDB for production)
@@ -109,7 +109,7 @@ Tests are organized by module with the main test directories:
 
 - **pandas**: Time series data manipulation
 - **numpy/scipy**: Numerical computing
-- **ib-insync**: Interactive Brokers API
+- **ib_async**: Interactive Brokers API (community-maintained fork of ib-insync)
 - **pymongo**: MongoDB integration
 - **PyYAML**: Configuration management
 - **matplotlib**: Plotting and visualization

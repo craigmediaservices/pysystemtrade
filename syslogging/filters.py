@@ -3,14 +3,14 @@ import logging
 
 class IBFilter(logging.Filter):
     """
-    Custom log filter for 'ib-insync'. Should be added at handler level
+    Custom log filter for 'ib_async'. Should be added at handler level
     """
 
     def __init__(self):
         super().__init__("ib_async")
 
     def filter(self, record):
-        # for all records with name starting 'ib_insync'
+        # for all records with name starting 'ib_async'
         if record.name.startswith(self.name):
             # if msg starts with 'Warning', then set the level to WARNING and allow
             if record.msg.startswith("Warning"):
