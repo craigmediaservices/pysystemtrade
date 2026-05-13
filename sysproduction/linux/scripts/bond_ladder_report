@@ -1,0 +1,3 @@
+#!/bin/bash
+. ~/.profile
+. p sysproduction.reporting.bond_ladder_report.bond_ladder_report
