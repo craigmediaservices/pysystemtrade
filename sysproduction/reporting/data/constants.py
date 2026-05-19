@@ -13,3 +13,14 @@ RAW_MAX_LEVERAGE = 1
 MAX_POSITION_TRADED_DAILY = 0.33
 MAX_RISK_EXPOSURE_ONE_INSTRUMENT = 0.20
 BAD_THRESHOLD = 0.3  ## Allows 30% leeway before suggesting add/remove market
+
+## Heuristic thresholds for score_duplicate_markets. Flag a leg when:
+##   - its annual risk per contract is outside [CAP_FIT_MIN, CAP_FIT_MAX]
+##     as a fraction of capital -- too small to bother (commission burden) or
+##     too big to subdivide a position
+##   - one sibling leg has DUPLICATE_LIQ_DOMINANT_RATIO x more daily volume risk
+##   - one sibling leg costs DUPLICATE_COST_LOSER_RATIO x more in SR_cost terms
+DUPLICATE_CAP_FIT_MIN = 0.001
+DUPLICATE_CAP_FIT_MAX = 0.02
+DUPLICATE_LIQ_DOMINANT_RATIO = 20.0
+DUPLICATE_COST_LOSER_RATIO = 2.0
