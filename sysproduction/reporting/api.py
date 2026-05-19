@@ -323,9 +323,14 @@ class reportingApi(object):
 
     def get_correlations_for_configured_duplicates(self) -> table:
         pairs = generate_duplicate_pairs(self.data)
-        corr_data = get_correlation_matrix_for_instruments(
-            self.data, self._get_configured_duplicates_list(pairs)
-        )
+        configured = self._get_configured_duplicates_list(pairs)
+        if len(configured) < 2:
+            return table(
+                "Potenially uncorrelated configured duplicates",
+                "No duplicate_instruments configured",
+            )
+
+        corr_data = get_correlation_matrix_for_instruments(self.data, configured)
         corr_data = cluster_correlation_matrix(corr_data)
         corr_data = corr_data.as_pd().round(2)
 
@@ -358,6 +363,12 @@ class reportingApi(object):
             if item not in self._get_configured_duplicates_list(pairs)
         ]
 
+        if len(unconfigured) < 2:
+            return table(
+                "Potentially unconfigured duplicates",
+                "Not enough unconfigured instruments to compute correlations",
+            )
+
         corr_data = get_correlation_matrix_for_instruments(self.data, unconfigured)
         corr_data = cluster_correlation_matrix(corr_data)
         corr_data = corr_data.as_pd().round(2)
@@ -370,9 +381,11 @@ class reportingApi(object):
                 if corr_value >= self._min_correlation:
                     rows.append(dict(first=inst1, second=inst2, correlation=corr_value))
 
-        potential_duplicates = pd.DataFrame(rows).sort_values(
-            "correlation", ascending=False
-        )
+        potential_duplicates = pd.DataFrame(rows)
+        if len(potential_duplicates) > 0:
+            potential_duplicates = potential_duplicates.sort_values(
+                "correlation", ascending=False
+            )
         table_corr = table("Potentially unconfigured duplicates", potential_duplicates)
 
         return table_corr
