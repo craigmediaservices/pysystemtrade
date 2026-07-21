@@ -17,10 +17,18 @@ from sysproduction.data.controls import dataLocks
 
 from sysexecution.order_stacks.order_stack import orderStackData
 from sysexecution.orders.base_orders import Order
-from sysexecution.orders.contract_orders import contractOrder, contractOrderType
+from sysexecution.orders.contract_orders import (
+    contractOrder,
+    contractOrderType,
+    best_order_type,
+)
 from sysexecution.trade_qty import tradeQuantity
 from sysexecution.orders.list_of_orders import listOfOrders
-from sysexecution.orders.instrument_orders import instrumentOrder, instrumentOrderType
+from sysexecution.orders.instrument_orders import (
+    instrumentOrder,
+    instrumentOrderType,
+    zero_roll_order_type,
+)
 
 
 from sysexecution.algos.allocate_algo_to_order import (
@@ -452,6 +460,11 @@ def contract_order_for_direct_instrument_child_date_and_trade(
 def map_instrument_order_type_to_contract_order_type(
     instrument_order_type: instrumentOrderType,
 ) -> contractOrderType:
+    # roll orders use zero-roll at instrument level but best execution at
+    # contract level, matching CONTRACT_ORDER_TYPE_FOR_ROLL_ORDERS
+    if instrument_order_type == zero_roll_order_type:
+        return best_order_type
+
     # will only work for matching order types eg best, limit, market, panic
     type_string = instrument_order_type.as_string()
     contract_order_type = contractOrderType(type_string)
