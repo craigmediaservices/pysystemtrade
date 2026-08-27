@@ -163,6 +163,12 @@ stranded_legs_report_config = reportConfig(
     output="email",
 )
 
+benchmark_report_config = reportConfig(
+    title="Benchmark vs competitors report",
+    function="sysproduction.reporting.benchmark_report.benchmark_report",
+    output="email",
+)
+
 ## The reports will be run in this order
 report_config_defaults = dict(
     slippage_report=slippage_report_config,
@@ -185,4 +191,5 @@ report_config_defaults = dict(
     commission_report=commission_report_config,
     fx_balance_report=fx_balance_report_config,
     bond_ladder_report=bond_ladder_report_config,
+    benchmark_report=benchmark_report_config,
 )
