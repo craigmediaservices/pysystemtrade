@@ -157,6 +157,12 @@ bond_ladder_report_config = reportConfig(
     output="email",
 )
 
+stranded_legs_report_config = reportConfig(
+    title="Stranded legs report",
+    function="sysproduction.reporting.stranded_legs_report.stranded_legs_report",
+    output="email",
+)
+
 ## The reports will be run in this order
 report_config_defaults = dict(
     slippage_report=slippage_report_config,
@@ -164,6 +170,7 @@ report_config_defaults = dict(
     roll_report=roll_report_config,
     daily_pandl_report=daily_pandl_report_config,
     reconcile_report=reconcile_report_config,
+    stranded_legs_report=stranded_legs_report_config,
     trade_report=trade_report_config,
     strategy_report=strategy_report_config,
     risk_report=risk_report_config,
