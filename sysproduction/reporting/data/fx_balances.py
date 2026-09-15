@@ -10,6 +10,8 @@ import pandas as pd
 
 from sysdata.data_blob import dataBlob
 from sysproduction.data.broker import dataBroker
+from sysproduction.data.instruments import diagInstruments
+from sysproduction.data.positions import diagPositions
 from sysproduction.data.currency_data import dataCurrency
 
 DEFAULT_FX_BALANCE_ALERT_THRESHOLD = 10000.0
@@ -59,9 +61,72 @@ def get_fx_balance_buffers(data: dataBlob) -> dict:
     return out
 
 
+def positions_by_currency_from_df(positions_df: pd.DataFrame, currency_lookup) -> dict:
+    """
+    Pure helper (unit-tested): collapse a contract-positions frame with columns
+    instrument_code / position into
+        {currency: dict(contracts=<sum of abs positions>,
+                        positions="BUND -3, OAT +2")}
+    currency_lookup(instrument_code) -> currency; instruments it raises on are
+    skipped. Instruments whose contracts net to zero are ignored.
+    """
+    out = {}
+    if positions_df is None or len(positions_df) == 0:
+        return out
+    per_instrument = positions_df.groupby("instrument_code")["position"].sum()
+    for instrument_code, position in per_instrument.items():
+        position = int(round(position))
+        if position == 0:
+            continue
+        try:
+            currency = currency_lookup(instrument_code)
+        except BaseException:
+            continue
+        entry = out.setdefault(currency, dict(contracts=0, positions=[]))
+        entry["contracts"] += abs(position)
+        entry["positions"].append("%s %+d" % (instrument_code, position))
+    for entry in out.values():
+        entry["positions"] = ", ".join(sorted(entry["positions"]))
+    return out
+
+
+def get_futures_positions_by_currency(data: dataBlob) -> dict:
+    """
+    Live futures positions grouped by the currency the instrument is
+    denominated in, so a cash balance can be read next to what it is backing.
+    Never raises: a DB/config problem just gives an empty dict.
+    """
+    try:
+        positions_df = (
+            diagPositions(data).get_all_current_contract_positions().as_pd_df()
+        )
+        get_currency = diagInstruments(data).get_currency
+        return positions_by_currency_from_df(positions_df, get_currency)
+    except BaseException:
+        return {}
+
+
+def add_positions_to_balances_df(
+    balances_df: pd.DataFrame, positions_by_currency: dict
+) -> pd.DataFrame:
+    """Add 'contracts' (count) and 'positions' (text) columns, indexed by currency."""
+    balances_df = balances_df.copy()
+    balances_df["contracts"] = [
+        int(positions_by_currency.get(ccy, {}).get("contracts", 0))
+        for ccy in balances_df.index
+    ]
+    balances_df["positions"] = [
+        positions_by_currency.get(ccy, {}).get("positions", "")
+        for ccy in balances_df.index
+    ]
+    return balances_df
+
+
 def get_fx_balances_as_df(data: dataBlob) -> pd.DataFrame:
     """
-    DataFrame indexed by currency with columns: balance, fx_rate_to_base, base_value.
+    DataFrame indexed by currency with columns: balance, fx_rate_to_base,
+    base_value, contracts (number of futures contracts held in instruments
+    denominated in that currency) and positions (text, e.g. "BUND -3, OAT +2").
     Sorted by absolute base value, largest first.
     """
     data_broker = dataBroker(data)
@@ -97,6 +162,7 @@ def get_fx_balances_as_df(data: dataBlob) -> pd.DataFrame:
     if len(df) > 0:
         df = df.set_index("currency")
         df = df.reindex(df["base_value"].abs().sort_values(ascending=False).index)
+        df = add_positions_to_balances_df(df, get_futures_positions_by_currency(data))
 
     return df
 
@@ -122,7 +188,8 @@ def get_fx_sweep_suggestions(
 
     Returns DataFrame indexed by currency with columns:
       balance, base_value, buffer_base, excess_base, action, pair,
-      approx_trade_qty.
+      approx_trade_qty, contracts, positions (the last two are copied from
+      balances_df when present, so you can see what the cash is backing).
     """
     buffers = buffers or {}
     rows = []
@@ -164,6 +231,8 @@ def get_fx_sweep_suggestions(
                 action="SELL" if trade_qty < 0 else "BUY",
                 pair="%s%s" % (currency, base_currency),
                 approx_trade_qty=int(round(trade_qty)),
+                contracts=int(row.get("contracts", 0)),
+                positions=row.get("positions", ""),
             )
         )
 
@@ -176,6 +245,8 @@ def get_fx_sweep_suggestions(
         "action",
         "pair",
         "approx_trade_qty",
+        "contracts",
+        "positions",
     ]
     if rows:
         return pd.DataFrame(rows, columns=cols).set_index("currency")

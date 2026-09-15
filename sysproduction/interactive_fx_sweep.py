@@ -3,10 +3,9 @@ Interactive helper to sweep large non-base currency cash balances back to base.
 
 This is a thin wrapper around the existing broker FX plumbing:
  - balances come from dataBroker.broker_fx_balances()
- - market sweeps go through dataBroker.broker_fx_market_order() (same path as
-   interactive_order_stack -> create FX trade)
- - limit-at-bid/ask sweeps are placed directly via the IB connection
-   (ib_async LimitOrder) so no changes to the core broker code are needed
+ - orders are placed directly via the IB connection (ib_async LimitOrder /
+   MarketOrder) on whichever direction of the pair IB lists (EUR.USD but
+   USD.JPY), so no changes to the core broker code are needed
 
 Nothing is ever placed without an explicit "Y" confirmation per trade, and
 there's a dry-run mode that just prints what it would do. Manual run only -
@@ -16,7 +15,6 @@ Run via: interactive_fx_sweep   (linux/scripts launcher, on PATH)
       or: python -m sysproduction.interactive_fx_sweep
 """
 
-from syscore.constants import arg_not_supplied
 from syscore.interactive.input import (
     get_input_from_user_and_convert_to_type,
     true_if_answer_is_yes,
@@ -37,10 +35,15 @@ from sysproduction.reporting.data.fx_balances import (
 QUOTE_WAIT_SECONDS = 4
 
 
-def interactive_fx_sweep(data: dataBlob = arg_not_supplied):
-    if data is arg_not_supplied:
-        data = dataBlob()
+def interactive_fx_sweep():
+    # no arguments: the linux/scripts launcher (run.py) prompts for every
+    # function argument, so like the other interactive_* tools we build the
+    # dataBlob ourselves
+    with dataBlob(log_name="Interactive-FX-Sweep") as data:
+        _interactive_fx_sweep(data)
 
+
+def _interactive_fx_sweep(data: dataBlob):
     set_pd_print_options()
 
     data_broker = dataBroker(data)
@@ -101,13 +104,9 @@ def interactive_fx_sweep(data: dataBlob = arg_not_supplied):
 
     dry_run = true_if_answer_is_yes("Dry run only (just print, place nothing)? (y/n) ")
 
-    default_account = data_broker.get_broker_account()
-    broker_account = get_input_from_user_and_convert_to_type(
-        "Account ID",
-        type_expected=str,
-        allow_default=True,
-        default_value=default_account,
-    )
+    # same account the whole system trades on (broker_account in private_config)
+    broker_account = data_broker.get_broker_account()
+    print("Account: %s" % broker_account)
 
     use_limit = False
     if not dry_run:
@@ -142,19 +141,14 @@ def interactive_fx_sweep(data: dataBlob = arg_not_supplied):
             print("Skipped.")
             continue
 
-        if use_limit:
-            _place_fx_limit_order(
-                data=data,
-                ccy1=ccy1,
-                ccy2=ccy2,
-                trade_qty=trade_qty,
-                account_id=broker_account,
-            )
-        else:
-            result = data_broker.broker_fx_market_order(
-                trade_qty, ccy1, account_id=broker_account, ccy2=ccy2
-            )
-            print("Submitted: %s" % str(result))
+        _place_fx_order(
+            data=data,
+            ccy1=ccy1,
+            ccy2=ccy2,
+            trade_qty=trade_qty,
+            account_id=broker_account,
+            use_limit=use_limit,
+        )
 
     print(
         "\nDone. Check the broker for fills. Re-run this tool (or the FX balance "
@@ -163,26 +157,76 @@ def interactive_fx_sweep(data: dataBlob = arg_not_supplied):
     return None
 
 
-def _place_fx_limit_order(
-    data: dataBlob, ccy1: str, ccy2: str, trade_qty: int, account_id: str
+def resolve_fx_order(
+    ccy1: str, ccy2: str, trade_qty: int, inverted: bool, bid: float, ask: float
+) -> tuple:
+    """
+    Pure helper (unit-tested). trade_qty is in ccy1 units: negative = sell ccy1
+    for ccy2, positive = buy ccy1 with ccy2.
+
+    IB only lists one direction of each pair (EUR.USD but USD.JPY). When the
+    pair we can trade is the inverse (inverted=True, i.e. contract is ccy2.ccy1)
+    the order is expressed in ccy2 units and the side flips: buying 2.8M JPY
+    with USD is SELL USD.JPY for 2.8M / price USD.
+
+    Returns (pair_symbol, action, quantity, limit_price). limit_price is the
+    passive side of the book: bid when selling the pair, ask when buying.
+    """
+    if not inverted:
+        action = "SELL" if trade_qty < 0 else "BUY"
+        quantity = abs(int(trade_qty))
+        pair = ccy1 + ccy2
+    else:
+        # we want to BUY ccy1 -> SELL the ccy2.ccy1 pair (and vice versa)
+        action = "BUY" if trade_qty < 0 else "SELL"
+        pair = ccy2 + ccy1
+        mid = (bid + ask) / 2.0
+        quantity = int(round(abs(trade_qty) / mid))
+    limit_price = bid if action == "SELL" else ask
+    return pair, action, quantity, limit_price
+
+
+def _qualify_fx_contract(ib, ccy1: str, ccy2: str):
+    """Return (contract, inverted). Tries ccy1.ccy2 then ccy2.ccy1."""
+    from ib_async import Forex
+
+    for inverted, symbol in ((False, ccy1 + ccy2), (True, ccy2 + ccy1)):
+        contract = Forex(symbol)
+        try:
+            qualified = ib.qualifyContracts(contract)
+        except BaseException:
+            qualified = []
+        if qualified and qualified[0] is not None and qualified[0].conId:
+            return qualified[0], inverted
+    return None, False
+
+
+def _place_fx_order(
+    data: dataBlob,
+    ccy1: str,
+    ccy2: str,
+    trade_qty: int,
+    account_id: str,
+    use_limit: bool,
 ):
     """
-    Place a spot FX limit order directly via the IB connection.
-
-    Priced at the current bid when selling ccy1, the current ask when buying -
-    i.e. a passive order resting on our side of the book.
+    Place a spot FX order directly via the IB connection, on whichever
+    direction of the pair IB lists. Limit orders rest on our side of the book
+    (bid when selling, ask when buying); market orders use the same quote only
+    to size inverted pairs.
     """
     # imported here so the module still imports if ib_async isn't installed
-    from ib_async import Forex, LimitOrder
+    from ib_async import LimitOrder, MarketOrder
 
     ib = data.ib_conn.ib
 
-    contract = Forex(ccy1 + ccy2)
-    qualified = ib.qualifyContracts(contract)
-    if not qualified:
-        print("Could not qualify IB contract for %s%s - skipped." % (ccy1, ccy2))
+    contract, inverted = _qualify_fx_contract(ib, ccy1, ccy2)
+    if contract is None:
+        print(
+            "IB lists neither %s%s nor %s%s - skipped, do it manually in TWS."
+            % (ccy1, ccy2, ccy2, ccy1)
+        )
         return None
-    contract = qualified[0]
 
     ticker = ib.reqMktData(contract, "", False, False)
     ib.sleep(QUOTE_WAIT_SECONDS)
@@ -193,31 +237,59 @@ def _place_fx_limit_order(
     def _bad(px):
         return px is None or px != px or px <= 0  # None or NaN or non-positive
 
-    side = "SELL" if trade_qty < 0 else "BUY"
-    limit_price = bid if side == "SELL" else ask
-    if _bad(limit_price):
+    if _bad(bid) or _bad(ask):
         print(
-            "No usable %s quote for %s%s (bid=%s ask=%s) - skipped, do it manually."
-            % ("bid" if side == "SELL" else "ask", ccy1, ccy2, bid, ask)
+            "No usable quote for %s (bid=%s ask=%s) - skipped, do it manually."
+            % (contract.localSymbol, bid, ask)
         )
         return None
 
-    print(
-        "Current %s%s quote: bid=%s ask=%s -> limit %s @ %s"
-        % (ccy1, ccy2, bid, ask, side, limit_price)
+    pair, action, quantity, limit_price = resolve_fx_order(
+        ccy1, ccy2, trade_qty, inverted, bid, ask
     )
-    if not true_if_answer_is_yes(
-        "Confirm LIMIT %s %s %s%s @ %s? (y/n) "
-        % (side, format(abs(trade_qty), ","), ccy1, ccy2, limit_price)
-    ):
+    if inverted:
+        print(
+            "IB quotes this as %s, so %s %s of %s becomes %s %s %s"
+            % (
+                contract.localSymbol,
+                "SELL" if trade_qty < 0 else "BUY",
+                format(abs(trade_qty), ","),
+                ccy1,
+                action,
+                format(quantity, ","),
+                ccy2,
+            )
+        )
+    print("Current %s quote: bid=%s ask=%s" % (contract.localSymbol, bid, ask))
+
+    if use_limit:
+        order = LimitOrder(action, quantity, limit_price)
+        description = "LIMIT %s %s %s @ %s" % (
+            action,
+            format(quantity, ","),
+            contract.localSymbol,
+            limit_price,
+        )
+    else:
+        order = MarketOrder(action, quantity)
+        description = "MARKET %s %s %s" % (
+            action,
+            format(quantity, ","),
+            contract.localSymbol,
+        )
+
+    if not true_if_answer_is_yes("Confirm %s? (y/n) " % description):
         print("Skipped.")
         return None
 
-    order = LimitOrder(side, abs(trade_qty), limit_price)
     order.account = account_id
     trade = ib.placeOrder(contract, order)
-    print("Submitted limit order: %s" % str(trade))
-    return None
+    ib.sleep(2)
+    print(
+        "Submitted %s: status=%s filled=%s"
+        % (description, trade.orderStatus.status, trade.orderStatus.filled)
+    )
+    return trade
 
 
 if __name__ == "__main__":

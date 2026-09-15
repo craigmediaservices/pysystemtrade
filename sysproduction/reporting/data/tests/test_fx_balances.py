@@ -7,6 +7,8 @@ from sysproduction.reporting.data.fx_balances import (
     get_fx_balance_alert_threshold,
     get_fx_balance_buffers,
     get_fx_balances_as_df,
+    positions_by_currency_from_df,
+    add_positions_to_balances_df,
     DEFAULT_FX_BALANCE_ALERT_THRESHOLD,
 )
 
@@ -159,3 +161,86 @@ def test_get_fx_balances_as_df_drops_pseudo_currencies(monkeypatch):
     assert "" not in df.index
     assert set(df.index) == {"USD", "EUR"}
     assert df.loc["EUR", "base_value"] == 550.0
+
+
+def _positions_df(rows):
+    # rows: list of (instrument_code, contract_date, position)
+    return pd.DataFrame(rows, columns=["instrument_code", "contract_date", "position"])
+
+
+def test_positions_by_currency_groups_and_nets():
+    df = _positions_df(
+        [
+            ("BUND", "20261200", -3),
+            ("OAT", "20261200", 2),
+            ("JPY", "20260900", -1),  # net-zero split: ignored
+            ("JPY", "20261200", 1),
+            ("GOLD", "20261200", 4),
+            ("UNKNOWN", "20261200", 1),  # no currency: skipped
+        ]
+    )
+    ccy = {"BUND": "EUR", "OAT": "EUR", "JPY": "USD", "GOLD": "USD"}
+    out = positions_by_currency_from_df(df, lambda ic: ccy[ic])
+    assert out["EUR"] == dict(contracts=5, positions="BUND -3, OAT +2")
+    assert out["USD"] == dict(contracts=4, positions="GOLD +4")
+    assert set(out) == {"EUR", "USD"}
+
+
+def test_positions_by_currency_empty():
+    assert positions_by_currency_from_df(_positions_df([]), lambda ic: "EUR") == {}
+    assert positions_by_currency_from_df(None, lambda ic: "EUR") == {}
+
+
+def test_add_positions_to_balances_and_carry_into_suggestions():
+    df = _balances_df(
+        [("EUR", 40000.0, 1.1, 44000.0), ("CHF", -15000.0, 1.2, -18000.0)]
+    )
+    df = add_positions_to_balances_df(
+        df, {"EUR": dict(contracts=5, positions="BUND -3, OAT +2")}
+    )
+    assert list(df.loc["EUR", ["contracts", "positions"]]) == [5, "BUND -3, OAT +2"]
+    assert list(df.loc["CHF", ["contracts", "positions"]]) == [0, ""]
+
+    out = get_fx_sweep_suggestions(df, base_currency="USD", threshold=10000.0)
+    assert out.loc["EUR", "contracts"] == 5
+    assert out.loc["EUR", "positions"] == "BUND -3, OAT +2"
+    assert out.loc["CHF", "contracts"] == 0
+    assert out.loc["CHF", "positions"] == ""
+
+
+def test_suggestions_without_position_columns_still_work():
+    df = _balances_df([("EUR", 40000.0, 1.1, 44000.0)])
+    out = get_fx_sweep_suggestions(df, base_currency="USD", threshold=10000.0)
+    assert out.loc["EUR", "contracts"] == 0
+    assert out.loc["EUR", "positions"] == ""
+
+
+def test_resolve_fx_order_direct_and_inverted():
+    from sysproduction.interactive_fx_sweep import resolve_fx_order
+
+    # sell 33,389 EUR for USD on EUR.USD: SELL at the bid
+    assert resolve_fx_order("EUR", "USD", -33389, False, 1.15432, 1.15433) == (
+        "EURUSD",
+        "SELL",
+        33389,
+        1.15432,
+    )
+    # buy 16,991 CHF with USD on CHF.USD: BUY at the ask
+    assert resolve_fx_order("CHF", "USD", 16991, False, 1.22309, 1.22316) == (
+        "CHFUSD",
+        "BUY",
+        16991,
+        1.22316,
+    )
+    # buy 2,860,865 JPY with USD, but IB lists USD.JPY: SELL USD.JPY for
+    # 2,860,865 / mid USD at the bid
+    pair, action, qty, px = resolve_fx_order(
+        "JPY", "USD", 2860865, True, 154.00, 154.02
+    )
+    assert (pair, action, px) == ("USDJPY", "SELL", 154.00)
+    assert qty == int(round(2860865 / 154.01))
+    # sell JPY for USD on USD.JPY: BUY USD.JPY at the ask
+    pair, action, qty, px = resolve_fx_order(
+        "JPY", "USD", -1540100, True, 154.00, 154.02
+    )
+    assert (pair, action, qty, px) == ("USDJPY", "BUY", 10000, 154.02)
