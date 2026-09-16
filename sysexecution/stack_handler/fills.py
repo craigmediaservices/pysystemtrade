@@ -17,6 +17,8 @@ from sysexecution.orders.list_of_orders import listOfOrders
 from sysexecution.trade_qty import tradeQuantity
 
 from sysproduction.data.positions import updatePositions
+from sysproduction.data.controls import dataLocks
+from sysexecution.orders.base_orders import overFilledOrder
 
 
 class stackHandlerForFills(stackHandlerForCompletions):
@@ -162,12 +164,16 @@ class stackHandlerForFills(stackHandlerForCompletions):
         fill_datetime: datetime.datetime,
     ):
         contract_order_id = contract_order_before_fill.order_id
-        self.contract_stack.change_fill_quantity_for_order(
-            contract_order_id,
-            filled_qty,
-            filled_price=filled_price,
-            fill_datetime=fill_datetime,
-        )
+        try:
+            self.contract_stack.change_fill_quantity_for_order(
+                contract_order_id,
+                filled_qty,
+                filled_price=filled_price,
+                fill_datetime=fill_datetime,
+            )
+        except overFilledOrder as e:
+            self.lock_instrument_after_overfill(contract_order_before_fill, e)
+            return None
 
         # if fill has changed then update positions
         # we do this here, because we can get here either from fills process
@@ -180,6 +186,34 @@ class stackHandlerForFills(stackHandlerForCompletions):
 
         ## We now pass it up to the next level
         self.apply_contract_fill_to_instrument_order(contract_order_id)
+
+    def lock_instrument_after_overfill(
+        self, contract_order: contractOrder, error: Exception
+    ):
+        """
+        The broker has filled more than the contract order asked for (e.g. a
+        duplicate broker order). Previously this exception killed the whole
+        stack handler and stopped trading in every instrument. Instead: lock
+        this instrument (the position break keeps it locked until the
+        positions are reconciled by hand) and carry on.
+        """
+        instrument_code = contract_order.instrument_code
+        log_attrs = {**contract_order.log_attributes(), "method": "temp"}
+        data_locks = dataLocks(self.data)
+        if not data_locks.is_instrument_locked(instrument_code):
+            self.log.critical(
+                "Over-filled contract order %s (%s): locking %s, reconcile "
+                "positions manually (balance trade) then clear the lock"
+                % (str(contract_order), str(error), instrument_code),
+                **log_attrs,
+            )
+            data_locks.add_lock_for_instrument(instrument_code)
+        else:
+            self.log.debug(
+                "Over-filled contract order %s, instrument already locked"
+                % str(contract_order),
+                **log_attrs,
+            )
 
     def apply_position_change_to_stored_contract_positions(
         self,

@@ -53,6 +53,17 @@ SIZE_LIMIT = 1
 no_need_to_switch = "_NO_NEED_TO_SWITCH"
 
 
+def order_must_be_cancelled_not_modified(order: Order) -> bool:
+    """
+    Calendar spread (combo) orders are cancelled and re-placed instead of
+    having their limit price modified in place.
+    """
+    try:
+        return bool(order.calendar_spread_order)
+    except (AttributeError, KeyError):
+        return False
+
+
 class algoOriginalBest(Algo):
     """
     This is the original 'best execution' algo I used in my legacy system
@@ -182,6 +193,21 @@ class algoOriginalBest(Algo):
                     )
 
                     if need_to_switch:
+                        if order_must_be_cancelled_not_modified(order_control.order):
+                            # IB refuses in-place price changes on some combo
+                            # (calendar spread) orders and leaves the original
+                            # working, so we never modify a spread: cancel it
+                            # (confirmed) and let the stack handler re-place
+                            # the unfilled remainder at the current price.
+                            data.log.debug(
+                                "Spread order: would switch to aggressive because %s, "
+                                "cancelling to re-place rather than modifying"
+                                % reason_to_switch,
+                                **log_attrs,
+                            )
+                            order_control = cancel_order(data, order_control)
+                            break
+
                         data.log.debug(
                             "Switch to aggressive because %s" % reason_to_switch,
                             **log_attrs,
@@ -212,6 +238,23 @@ class algoOriginalBest(Algo):
             )
             if order_cancelled:
                 data.log.warning("Order has been cancelled: not by algo", **log_attrs)
+                break
+
+            order_inactive = (
+                self.data_broker.check_order_is_inactive_given_control_object(
+                    order_control
+                )
+            )
+            if order_inactive:
+                # Either rejected outright, or a modification was refused and
+                # the original order is still working. Never walk away from
+                # it: cancel explicitly and wait for confirmation.
+                data.log.warning(
+                    "Order reported Inactive by broker: cancelling explicitly "
+                    "before giving up",
+                    **log_attrs,
+                )
+                order_control = cancel_order(data, order_control)
                 break
 
         return order_control

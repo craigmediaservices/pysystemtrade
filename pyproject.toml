@@ -86,6 +86,7 @@ testpaths = [
     # "sysquant/estimators",
     "sysquant/optimisation",
     "sysproduction/reporting/data/tests",
+    "sysexecution/tests/test_order_lifecycle_guards.py",
     "sysquant/tests",
     # "systems",
     # "systems/accounts",

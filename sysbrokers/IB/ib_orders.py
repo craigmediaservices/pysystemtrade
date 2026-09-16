@@ -27,6 +27,34 @@ from sysexecution.tick_data import tickerObject
 from syslogging.logger import *
 
 
+def ib_status_means_cancelled(status: str) -> bool:
+    """
+    Only an explicit cancellation counts as cancelled.
+
+    NOTE: ib_async lists 'Inactive' among OrderStatus.DoneStates, but IB uses
+    Inactive both for a rejected order AND for a working order whose
+    modification was refused by the exchange (seen 2026-09-16 on a Eurex
+    calendar spread: the order stayed live at the old price and later filled).
+    Treating Inactive as cancelled made the algo abandon a live order and the
+    stack handler submit a duplicate. Inactive is handled separately.
+    """
+    return status in (ibOrderStatus.Cancelled, ibOrderStatus.ApiCancelled)
+
+
+def ib_status_means_inactive(status: str) -> bool:
+    return status == ibOrderStatus.Inactive
+
+
+def ib_status_means_open(status: str) -> bool:
+    """
+    Anything that is neither filled nor explicitly cancelled may still trade,
+    including Inactive (see above).
+    """
+    if status == ibOrderStatus.Filled:
+        return False
+    return not ib_status_means_cancelled(status)
+
+
 class ibOrderWithControls(orderWithControls):
     def __init__(
         self,
@@ -438,11 +466,33 @@ class ibExecutionStackData(brokerExecutionStackData):
         self, broker_order_with_controls: ibOrderWithControls
     ) -> bool:
         status = self.get_status_for_control_object(broker_order_with_controls)
-        cancellation_status = (
-            status in ibOrderStatus.DoneStates and status != ibOrderStatus.Filled
-        )
 
-        return cancellation_status
+        return ib_status_means_cancelled(status)
+
+    def check_order_is_inactive_given_control_object(
+        self, broker_order_with_controls: ibOrderWithControls
+    ) -> bool:
+        status = self.get_status_for_control_object(broker_order_with_controls)
+
+        return ib_status_means_inactive(status)
+
+    def check_order_is_still_open_at_broker(self, broker_order: brokerOrder) -> bool:
+        """
+        Is this (database) broker order still a live order at IB?
+
+        Used before creating another broker order for the same contract order:
+        if an earlier child is still working at the broker, placing another one
+        would double up the trade.
+        """
+        matched_control_order = (
+            self.match_db_broker_order_to_control_order_from_brokers(broker_order)
+        )
+        if matched_control_order is missing_order:
+            return False
+
+        status = self.get_status_for_control_object(matched_control_order)
+
+        return ib_status_means_open(status)
 
     def _get_status_for_trade_object(self, original_trade_object: ibTrade) -> str:
         self.ib_client.refresh()

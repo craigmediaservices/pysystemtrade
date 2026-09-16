@@ -131,4 +131,20 @@ class algoMarket(Algo):
                 )
                 break
 
+            is_order_inactive = (
+                data_broker.check_order_is_inactive_given_control_object(
+                    broker_order_with_controls
+                )
+            )
+            if is_order_inactive:
+                self.data.log.warning(
+                    "Order reported Inactive by broker: cancelling explicitly "
+                    "before giving up",
+                    **log_attrs,
+                )
+                broker_order_with_controls = cancel_order(
+                    self.data, broker_order_with_controls
+                )
+                break
+
         return broker_order_with_controls

@@ -483,6 +483,22 @@ class dataBroker(productionDataLayerGeneric):
 
         return result
 
+    def check_order_is_inactive_given_control_object(
+        self, broker_order_with_controls: orderWithControls
+    ) -> bool:
+        result = self.broker_execution_stack_data.check_order_is_inactive_given_control_object(
+            broker_order_with_controls
+        )
+
+        return result
+
+    def check_order_is_still_open_at_broker(self, broker_order: brokerOrder) -> bool:
+        result = self.broker_execution_stack_data.check_order_is_still_open_at_broker(
+            broker_order
+        )
+
+        return result
+
     def modify_limit_price_given_control_object(
         self, broker_order_with_controls: orderWithControls, new_limit_price: float
     ) -> orderWithControls:

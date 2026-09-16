@@ -2,7 +2,7 @@ from copy import copy
 from syscore.objects import (
     resolve_function,
 )
-from sysexecution.orders.named_order_objects import missing_order
+from sysexecution.orders.named_order_objects import missing_order, no_children
 from sysproduction.data.controls import dataTradeLimits
 
 from sysexecution.algos.allocate_algo_to_order import (
@@ -94,6 +94,14 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
             # already being traded by an active algo
             return missing_order
 
+        if self.contract_order_has_unfilled_child_still_open_at_broker(
+            original_contract_order
+        ):
+            # an earlier broker order for this contract order is still working
+            # at the broker (e.g. an algo gave up on it): placing another one
+            # would double up the trade
+            return missing_order
+
         if original_contract_order.panic_order:
             ## Do no further checks or resizing whatsoever!
             return original_contract_order
@@ -119,6 +127,33 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
         contract_order_to_trade = self.size_contract_order(original_contract_order)
 
         return contract_order_to_trade
+
+    def contract_order_has_unfilled_child_still_open_at_broker(
+        self, contract_order: contractOrder
+    ) -> bool:
+        children = contract_order.children
+        if children is no_children:
+            return False
+
+        broker_orders = self.broker_stack.get_list_of_orders_from_order_id_list(
+            children
+        )
+        for broker_order in broker_orders:
+            if broker_order is missing_order:
+                continue
+            if broker_order.fill_equals_desired_trade():
+                continue
+            if self.data_broker.check_order_is_still_open_at_broker(broker_order):
+                self.log.warning(
+                    "Broker order %s is still open at the broker: not creating "
+                    "another broker order for %s"
+                    % (str(broker_order), str(contract_order)),
+                    **contract_order.log_attributes(),
+                    method="temp",
+                )
+                return True
+
+        return False
 
     def size_contract_order(
         self, original_contract_order: contractOrder
