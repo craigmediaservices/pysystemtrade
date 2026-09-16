@@ -18,8 +18,8 @@ from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysproduction.data.controls import dataLocks
 
 
-# hard stop on a submit -> done-unfilled -> resubmit loop
-MAX_BROKER_ORDERS_PER_CONTRACT_ORDER = 6
+# hard stop on a submit -> done-unfilled -> resubmit loop (unfilled children only)
+MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER = 6
 
 
 class stackHandlerCreateBrokerOrders(stackHandlerForFills):
@@ -160,17 +160,36 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
     def contract_order_has_too_many_children(
         self, contract_order: contractOrder
     ) -> bool:
+        """
+        Cap on UNFILLED broker orders per contract order. A submit -> "done,
+        unfilled" -> resubmit loop leaves a trail of zero-fill children; an
+        order legitimately worked in slices (36 one-lot fills for one
+        contract order on 2026-09-15) leaves filled ones, which do not count.
+        """
         if contract_order.no_children():
             return False
-        n_children = len(contract_order.children)
-        if n_children < MAX_BROKER_ORDERS_PER_CONTRACT_ORDER:
+        broker_orders = self.broker_stack.get_list_of_orders_from_order_id_list(
+            contract_order.children
+        )
+        n_unfilled = len(
+            [
+                o
+                for o in broker_orders
+                if o is not missing_order and o.fill.equals_zero()
+            ]
+        )
+        if n_unfilled < MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER:
             return False
         already = getattr(self, "_warned_child_cap", set())
         log_attrs = {**contract_order.log_attributes(), "method": "temp"}
         msg = (
-            "%s already has %d broker orders today (cap %d): not creating more, "
-            "check the broker for live orders and the log for rejections"
-            % (str(contract_order), n_children, MAX_BROKER_ORDERS_PER_CONTRACT_ORDER)
+            "%s already has %d unfilled broker orders today (cap %d): not creating "
+            "more, check the broker for live orders and the log for rejections"
+            % (
+                str(contract_order),
+                n_unfilled,
+                MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER,
+            )
         )
         if contract_order.order_id in already:
             self.log.debug(msg, **log_attrs)

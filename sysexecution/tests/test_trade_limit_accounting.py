@@ -10,7 +10,7 @@ from sysexecution.orders.broker_orders import brokerOrder
 from sysexecution.orders.contract_orders import contractOrder
 from sysexecution.stack_handler.create_broker_orders_from_contract_orders import (
     stackHandlerCreateBrokerOrders,
-    MAX_BROKER_ORDERS_PER_CONTRACT_ORDER,
+    MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER,
 )
 from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysexecution.trade_qty import tradeQuantity
@@ -167,18 +167,55 @@ def test_strategy_orders_are_limited_as_before():
 # --- cap on broker orders per contract order --------------------------------
 
 
-def test_child_cap_blocks_and_logs_critical_once():
+class _StackWith:
+    def __init__(self, orders):
+        self._orders = orders
+
+    def get_list_of_orders_from_order_id_list(self, id_list):
+        return [self._orders[i] for i in id_list]
+
+
+def _children(n_unfilled, n_filled):
+    orders = {}
+    i = 0
+    for _ in range(n_unfilled):
+        orders[i] = brokerOrder("strategy", "INSTR", "20261200", 1)
+        i += 1
+    for _ in range(n_filled):
+        o = brokerOrder("strategy", "INSTR", "20261200", 1)
+        o._fill = tradeQuantity([1])
+        orders[i] = o
+        i += 1
+    return orders
+
+
+def _capped_handler(orders):
     handler = _handler()
+    handler._broker_stack = _StackWith(orders)
+    return handler
+
+
+def test_child_cap_blocks_on_unfilled_children_and_logs_critical_once():
+    orders = _children(MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER, 0)
+    handler = _capped_handler(orders)
     order = contractOrder("strategy", "INSTR", "20261200", 1)
-    order._children = list(range(MAX_BROKER_ORDERS_PER_CONTRACT_ORDER))
+    order._children = list(orders.keys())
     order._order_id = 7084
     assert handler.contract_order_has_too_many_children(order)
     assert handler.contract_order_has_too_many_children(order)
     handler._log.critical.assert_called_once()
 
 
-def test_child_cap_allows_normal_orders():
-    handler = _handler()
+def test_child_cap_ignores_filled_slices():
+    # 36 one-lot fills under one contract order is normal slicing, not a loop
+    orders = _children(2, 36)
+    handler = _capped_handler(orders)
+    order = contractOrder("strategy", "INSTR", "20261200", 40)
+    order._children = list(orders.keys())
+    assert not handler.contract_order_has_too_many_children(order)
+
+
+def test_child_cap_allows_orders_without_children():
+    handler = _capped_handler({})
     order = contractOrder("strategy", "INSTR", "20261200", 1)
-    order._children = [1, 2]
     assert not handler.contract_order_has_too_many_children(order)
