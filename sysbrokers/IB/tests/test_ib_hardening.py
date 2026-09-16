@@ -14,7 +14,10 @@ from syscore.cache import Cache
 from syscore.exceptions import missingContract
 from sysbrokers.IB import ib_connection
 from sysbrokers.IB.client.ib_contracts_client import ibContractsClient
-from sysbrokers.IB.ib_orders import ibExecutionStackData
+from sysbrokers.IB.ib_orders import (
+    ibExecutionStackData,
+    contract_for_instrument_lookup,
+)
 
 
 class _Config:
@@ -117,3 +120,29 @@ def test_timeout_from_ib_is_fatal_and_logged_critical():
     with pytest.raises(asyncio.TimeoutError):
         stack.get_open_order_keys_from_broker()
     stack.log.critical.assert_called_once()
+
+
+# --- combo orders identify their instrument from a leg ----------------------------
+
+
+def test_combo_uses_first_leg_for_instrument_lookup():
+    leg = SimpleNamespace(secType="FUT", symbol="M1MS", conId=655438056)
+    combo = SimpleNamespace(
+        ibcontract=SimpleNamespace(secType="BAG", symbol="M1MS"), legs=[leg]
+    )
+    assert contract_for_instrument_lookup(combo) is leg
+
+
+def test_outright_contract_is_used_directly():
+    fut = SimpleNamespace(secType="FUT", symbol="FESB")
+    assert (
+        contract_for_instrument_lookup(SimpleNamespace(ibcontract=fut, legs=[])) is fut
+    )
+
+
+def test_combo_without_resolved_legs_falls_back_to_itself():
+    bag = SimpleNamespace(secType="BAG", symbol="M1MS")
+    assert (
+        contract_for_instrument_lookup(SimpleNamespace(ibcontract=bag, legs=None))
+        is bag
+    )
