@@ -22,18 +22,18 @@ DEFAULT_IB_REQUEST_TIMEOUT_SECONDS = 120.0
 def get_ib_request_timeout_seconds() -> float:
     """
     Seconds a blocking IB request may take before ib_async raises. Override
-    with 'ib_request_timeout_seconds' in private config; 0 restores 'wait
-    forever'. Generous because historical-data requests can legitimately
-    take tens of seconds.
+    with 'ib_request_timeout_seconds' in private config; 0 means wait forever.
+    Generous because historical-data requests can legitimately take tens of
+    seconds. A request that does time out raises asyncio.TimeoutError from
+    the ib_async call; the open-order checks catch it and assume orders are
+    still open, anywhere else it ends the process (visible, restartable)
+    rather than hanging it invisibly.
     """
-    try:
-        config = get_production_config()
-        value = config.get_element_or_default(
-            "ib_request_timeout_seconds", DEFAULT_IB_REQUEST_TIMEOUT_SECONDS
-        )
-        return float(value)
-    except BaseException:
-        return DEFAULT_IB_REQUEST_TIMEOUT_SECONDS
+    config = get_production_config()
+    value = config.get_element_or_default(
+        "ib_request_timeout_seconds", DEFAULT_IB_REQUEST_TIMEOUT_SECONDS
+    )
+    return float(value)
 
 
 class connectionIB(object):

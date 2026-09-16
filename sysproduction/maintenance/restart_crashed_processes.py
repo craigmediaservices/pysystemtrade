@@ -25,12 +25,13 @@ import time
 
 from sysdata.data_blob import dataBlob
 from sysproduction.data.control_process import dataControlProcess
+from sysproduction.maintenance import work_path
 from sysproduction.maintenance.health_check import (
     DAYTIME_PROCESSES,
-    LOG_TAGS,
-    SILENT_MINUTES,
-    minutes_since_last_log_line,
+    SCRIPT_NAME,
     pid_alive,
+    pid_runs_script,
+    process_looks_hung,
     should_be_running,
 )
 
@@ -38,13 +39,9 @@ from sysproduction.maintenance.health_check import (
 # it blindly hides that (and can restart into a half-processed fill). So: at
 # most MAX_RESTARTS_PER_DAY per process, never within MIN_MINUTES_BETWEEN,
 # and once the budget is spent we log CRITICAL (emailed) instead.
-STATE_FILE = os.path.expanduser(
-    "~/pysystemtrade/private/maintenance_work/restart_state.json"
-)
+STATE_FILE = work_path("restart_state.json")
 MAX_RESTARTS_PER_DAY = 2
 MIN_MINUTES_BETWEEN = 20
-# a freshly started process is given this long before a silent log counts as hung
-HANG_GRACE_MINUTES = 10
 
 
 def load_restart_history() -> dict:
@@ -61,7 +58,6 @@ def load_restart_history() -> dict:
 
 def save_restart_history(history: dict):
     raw = {name: [t.isoformat() for t in stamps] for name, stamps in history.items()}
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(raw, f, indent=1)
 
@@ -80,27 +76,12 @@ def restart_allowed(stamps: list, now: datetime.datetime) -> tuple:
     return True, ""
 
 
-def looks_hung(last_start_time: datetime.datetime, name: str, now: datetime.datetime):
-    """
-    Inside its window with a live PID, but no log line for SILENT_MINUTES and
-    started more than HANG_GRACE_MINUTES ago. Returns (hung, minutes_silent).
-    """
-    tag = LOG_TAGS.get(name)
-    if tag is None:
-        return False, None
-    started_min_ago = (now - last_start_time).total_seconds() / 60.0
-    if started_min_ago < HANG_GRACE_MINUTES:
-        return False, None
-    age = minutes_since_last_log_line(tag, now)
-    if age is None or age <= SILENT_MINUTES:
-        return False, age
-    return True, age
-
-
-def kill_process(pid) -> bool:
+def kill_process(pid, script_name: str) -> bool:
+    """SIGKILL, but only a pid whose command line is the expected script."""
+    if not pid_runs_script(pid, script_name):
+        return False
     try:
-        pid = int(float(pid))
-        os.kill(pid, signal.SIGKILL)
+        os.kill(int(float(pid)), signal.SIGKILL)
     except BaseException:
         return False
     for _ in range(20):
@@ -144,15 +125,11 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
                 continue
             if not should_be_running(control, name, now):
                 continue
-            hung, silent = looks_hung(c.last_start_time, name, now)
+            hung, detail = process_looks_hung(name, c, now)
             if not hung:
                 continue
             allowed, why = restart_allowed(history.get(name, []), now)
-            msg = "%s alive (pid %s) but no log line for %d min: hung" % (
-                name,
-                int(c.process_id),
-                int(silent),
-            )
+            msg = "%s alive (pid %s) but hung: %s" % (name, int(c.process_id), detail)
             if not allowed:
                 print("   %s - NOT killing: %s" % (msg, why))
                 if not dry_run:
@@ -163,8 +140,11 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
             print("   %s -> %s" % (msg, "would kill" if dry_run else "killing"))
             if not dry_run:
                 data.log.critical("%s; killing and restarting" % msg)
-                if not kill_process(c.process_id):
-                    print("   could not kill pid %s" % c.process_id)
+                if not kill_process(c.process_id, SCRIPT_NAME.get(name, name)):
+                    print(
+                        "   could not kill pid %s (not the expected script?)"
+                        % c.process_id
+                    )
 
         # step 1: interactive_controls 4/44
         procs = control.get_dict_of_control_processes()
@@ -211,9 +191,9 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
                 restart_process(script)
                 restarted.append(name)
                 history.setdefault(name, []).append(now)
-                save_restart_history(history)
 
     if restarted:
+        save_restart_history(history)
         time.sleep(25)
         with dataBlob(log_name="Maintenance-Restart-Processes") as data:
             procs = dataControlProcess(data).get_dict_of_control_processes()

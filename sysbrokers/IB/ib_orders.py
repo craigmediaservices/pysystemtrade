@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 
 from ib_async import Trade as ibTrade, OrderStatus as ibOrderStatus
@@ -549,13 +550,19 @@ class ibExecutionStackData(brokerExecutionStackData):
         if len(keys) == 0:
             return False
         open_keys = self.get_open_order_keys_from_broker()
+        if open_keys is None:
+            # broker did not answer: assume the order is still open (fail
+            # closed - no duplicate order, cancel-wait keeps waiting)
+            return True
 
         return len(keys.intersection(open_keys)) > 0
 
-    def get_open_order_keys_from_broker(self) -> set:
+    def get_open_order_keys_from_broker(self):
         """
         Fresh reqAllOpenOrders (all clients), cached for OPEN_ORDER_CACHE_SECONDS
-        because the stack handler asks several times per pass.
+        because the stack handler asks several times per pass. Returns None if
+        IB did not answer within the request timeout: callers must treat that
+        as 'unknown', never as 'no open orders'.
         """
         now = datetime.datetime.now()
         cached = getattr(self, "_open_order_keys_cache", None)
@@ -565,7 +572,14 @@ class ibExecutionStackData(brokerExecutionStackData):
             if age < OPEN_ORDER_CACHE_SECONDS:
                 return keys
 
-        list_of_ib_trades = self.ib_client.ib.reqAllOpenOrders()
+        try:
+            list_of_ib_trades = self.ib_client.ib.reqAllOpenOrders()
+        except (asyncio.TimeoutError, TimeoutError):
+            self.log.warning(
+                "IB did not answer reqAllOpenOrders within the request timeout: "
+                "treating orders as still open"
+            )
+            return None
         keys = open_order_keys_from_ib_trades(list_of_ib_trades)
         self._open_order_keys_cache = (now, keys)
 

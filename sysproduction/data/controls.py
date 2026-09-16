@@ -41,6 +41,7 @@ from sysdata.data_blob import dataBlob
 
 from sysexecution.trade_qty import tradeQuantity
 from sysexecution.orders.broker_orders import brokerOrder
+from sysobjects.production.tradeable_object import instrumentStrategy
 from sysexecution.orders.instrument_orders import instrumentOrder
 from sysexecution.orders.list_of_orders import (
     listOfOrders,
@@ -118,6 +119,35 @@ class dataLocks(productionDataLayerGeneric):
         return self.db_lock_data.get_list_of_locked_instruments()
 
 
+def is_roll_order(order) -> bool:
+    try:
+        return bool(order.order_info.get("roll_order", False))
+    except AttributeError:
+        return False
+
+
+def limit_size_of_quantity(order, qty) -> int:
+    """
+    How much of a trade limit a quantity uses.
+
+    A roll order is sized by the POSITION being rolled (the largest leg), not
+    by the sum of its legs: a [-13, +13] spread is a 13-lot roll, and each
+    outright leg of a Force_Outright roll is 13. Strategy orders use the
+    total absolute quantity as before. This keeps the instrument limit as a
+    real circuit-breaker for rolls (limit 0 still stops them) without a
+    limit sized for normal trading blocking every roll.
+    """
+    try:
+        legs = [abs(int(q)) for q in qty]
+    except TypeError:
+        legs = [abs(int(qty))]
+    if len(legs) == 0:
+        return 0
+    if is_roll_order(order):
+        return max(legs)
+    return sum(legs)
+
+
 class dataTradeLimits(productionDataLayerGeneric):
     def _add_required_classes_to_data(self, data) -> dataBlob:
         data.add_class_object(mongoTradeLimitData)
@@ -159,19 +189,18 @@ class dataTradeLimits(productionDataLayerGeneric):
         return possible_trade
 
     def add_trade(self, executed_order: brokerOrder):
-        # Count what was FILLED, not what was submitted: an order cancelled
-        # unfilled (algo timeout, end-of-day sweep) used to consume the
-        # day's limit anyway, so a stalled roll leg zeroed itself out.
-        trade_size = executed_order.fill.total_abs_qty()
-        if trade_size == 0:
-            return None
-        instrument_strategy = executed_order.instrument_strategy
+        # Charged on FILLS (see stackHandlerForFills), sized by limit_size_of_quantity
+        trade_size = limit_size_of_quantity(executed_order, executed_order.fill)
+        self.add_trade_quantity(executed_order.instrument_strategy, trade_size)
 
-        self.db_trade_limit_data.add_trade(instrument_strategy, trade_size)
+    def add_trade_quantity(self, instrument_strategy: instrumentStrategy, size: int):
+        if size <= 0:
+            return None
+        self.db_trade_limit_data.add_trade(instrument_strategy, int(size))
 
     def remove_trade(self, order: brokerOrder):
         instrument_strategy = order.instrument_strategy
-        trade = order.trade.total_abs_qty()
+        trade = limit_size_of_quantity(order, order.fill)
 
         self.db_trade_limit_data.remove_trade(instrument_strategy, trade)
 

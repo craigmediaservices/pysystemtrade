@@ -3,7 +3,7 @@ from syscore.objects import (
     resolve_function,
 )
 from sysexecution.orders.named_order_objects import missing_order
-from sysproduction.data.controls import dataTradeLimits
+from sysproduction.data.controls import dataTradeLimits, limit_size_of_quantity
 
 from sysexecution.algos.allocate_algo_to_order import (
     check_and_if_required_allocate_algo_to_single_contract_order,
@@ -16,6 +16,10 @@ from sysexecution.order_stacks.broker_order_stack import orderWithControls
 from sysexecution.algos.algo import Algo
 from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysproduction.data.controls import dataLocks
+
+
+# hard stop on a submit -> done-unfilled -> resubmit loop
+MAX_BROKER_ORDERS_PER_CONTRACT_ORDER = 6
 
 
 class stackHandlerCreateBrokerOrders(stackHandlerForFills):
@@ -106,6 +110,11 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
             # would double up the trade
             return missing_order
 
+        if self.contract_order_has_too_many_children(original_contract_order):
+            # hard stop on a submit -> "done, unfilled" -> resubmit loop,
+            # independent of trade limits (which are charged on fills)
+            return missing_order
+
         # CHECK FOR LOCKS
         data_locks = dataLocks(self.data)
         instrument_locked = data_locks.is_instrument_locked(
@@ -147,6 +156,29 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
                 return True
 
         return False
+
+    def contract_order_has_too_many_children(
+        self, contract_order: contractOrder
+    ) -> bool:
+        if contract_order.no_children():
+            return False
+        n_children = len(contract_order.children)
+        if n_children < MAX_BROKER_ORDERS_PER_CONTRACT_ORDER:
+            return False
+        already = getattr(self, "_warned_child_cap", set())
+        log_attrs = {**contract_order.log_attributes(), "method": "temp"}
+        msg = (
+            "%s already has %d broker orders today (cap %d): not creating more, "
+            "check the broker for live orders and the log for rejections"
+            % (str(contract_order), n_children, MAX_BROKER_ORDERS_PER_CONTRACT_ORDER)
+        )
+        if contract_order.order_id in already:
+            self.log.debug(msg, **log_attrs)
+        else:
+            self.log.critical(msg, **log_attrs)
+            already.add(contract_order.order_id)
+            self._warned_child_cap = already
+        return True
 
     def _log_open_child_block_once(
         self, contract_order: contractOrder, broker_order: brokerOrder
@@ -203,23 +235,28 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
     def apply_trade_limits_to_contract_order(
         self, proposed_order: contractOrder
     ) -> contractOrder:
-        if proposed_order.roll_order:
-            # Roll orders are generated from an existing position and are
-            # net-flat (spread) or bounded by it (outright legs); a limit
-            # sized for normal trading only blocks the roll. Limits remain
-            # the circuit-breaker for strategy orders.
-            return proposed_order
-
         data_trade_limits = dataTradeLimits(self.data)
 
         instrument_strategy = proposed_order.instrument_strategy
 
-        # proposed_order.trade.total_abs_qty() is a scalar, returns a scalar
-        maximum_abs_qty = (
-            data_trade_limits.what_trade_is_possible_for_strategy_instrument(
-                instrument_strategy, proposed_order.trade
+        if proposed_order.roll_order:
+            # A roll is sized by the position being rolled (largest leg), see
+            # limit_size_of_quantity; the instrument limit still applies, so
+            # setting it to 0 still stops a roll.
+            roll_size = limit_size_of_quantity(proposed_order, proposed_order.trade)
+            possible_size = (
+                data_trade_limits.what_trade_qty_possible_for_instrument_code(
+                    proposed_order.instrument_code, roll_size
+                )
             )
-        )
+            maximum_abs_qty = abs(int(possible_size)) * len(proposed_order.trade)
+        else:
+            # proposed_order.trade.total_abs_qty() is a scalar, returns a scalar
+            maximum_abs_qty = (
+                data_trade_limits.what_trade_is_possible_for_strategy_instrument(
+                    instrument_strategy, proposed_order.trade
+                )
+            )
 
         contract_order_after_trade_limits = (
             proposed_order.change_trade_size_proportionally_to_meet_abs_qty_limit(
@@ -381,8 +418,8 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
     ):
         broker_order = completed_broker_order_with_controls.order
 
-        # update trade limits
-        self.add_trade_to_trade_limits(broker_order)
+        # trade limits are charged as fills land in the database
+        # (stackHandlerForFills.apply_broker_order_fills_to_database)
 
         # apply fills and commissions
         self.apply_broker_order_fills_to_database(
@@ -395,8 +432,3 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
         self.log.debug(
             "Released contract order %s from algo control" % contract_order_id
         )
-
-    def add_trade_to_trade_limits(self, executed_order: brokerOrder):
-        data_trade_limits = dataTradeLimits(self.data)
-
-        data_trade_limits.add_trade(executed_order)

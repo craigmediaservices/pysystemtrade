@@ -1,7 +1,7 @@
-import datetime
 from copy import copy
 from ib_async import Contract
 
+from syscore.cache import _get_key
 from syscore.cache import Cache
 from syscore.exceptions import missingData, missingContract
 from sysbrokers.IB.client.ib_client import ibClient
@@ -37,7 +37,13 @@ from sysobjects.production.trading_hours.trading_hours import listOfTradingHours
 from sysexecution.trade_qty import tradeQuantity
 
 
-CONTRACT_CHAIN_CACHE_SECONDS = 3600.0
+def _contract_with_conid(contract_chain: list, conId) -> Contract:
+    conId_list = [contract.conId for contract in contract_chain]
+    try:
+        contract_idx = conId_list.index(conId)
+    except ValueError:
+        raise missingContract
+    return contract_chain[contract_idx]
 
 
 class ibContractsClient(ibClient):
@@ -575,45 +581,33 @@ class ibContractsClient(ibClient):
 
     def ib_get_contract_with_conId(self, symbol: str, conId) -> Contract:
         contract_chain = self._get_contract_chain_for_symbol(symbol)
-        conId_list = [contract.conId for contract in contract_chain]
         try:
-            contract_idx = conId_list.index(conId)
-        except ValueError:
-            raise missingContract
+            return _contract_with_conid(contract_chain, conId)
+        except missingContract:
+            pass
+        # the cached chain may be stale or partial: refetch once before giving up
+        self._forget_contract_chain_for_symbol(symbol)
+        contract_chain = self._get_contract_chain_for_symbol(symbol)
 
-        required_contract = contract_chain[contract_idx]
-
-        return required_contract
+        return _contract_with_conid(contract_chain, conId)
 
     def _get_contract_chain_for_symbol(self, symbol: str) -> list:
-        # Cached per symbol: resolving the legs of every combo order the
-        # broker returns asked IB for the same chain 26 times in one second
-        # on 2026-09-16, after which IB stopped answering.
-        cached = self._contract_chain_cache_get(symbol)
-        if cached is not None:
-            return cached
+        # Cached per symbol for the life of the process (self.cache, as for
+        # resolved contracts): combo-leg resolution fetched the same chain
+        # for every leg of every combo order the broker returned.
+        return self.cache.get(self._get_contract_chain_for_symbol_uncached, symbol)
 
+    def _get_contract_chain_for_symbol_uncached(self, symbol: str) -> list:
         ibcontract_pattern = ib_futures_instrument_just_symbol(symbol)
         contract_chain = self.ib_get_contract_chain(ibcontract_pattern)
-        self._contract_chain_cache_put(symbol, contract_chain)
 
         return contract_chain
 
-    def _contract_chain_cache_get(self, symbol: str):
-        cache = getattr(self, "_contract_chain_cache", {})
-        entry = cache.get(symbol)
-        if entry is None:
-            return None
-        stored_at, chain = entry
-        age = (datetime.datetime.now() - stored_at).total_seconds()
-        if age > CONTRACT_CHAIN_CACHE_SECONDS:
-            return None
-        return chain
-
-    def _contract_chain_cache_put(self, symbol: str, chain: list):
-        cache = getattr(self, "_contract_chain_cache", {})
-        cache[symbol] = (datetime.datetime.now(), chain)
-        self._contract_chain_cache = cache
+    def _forget_contract_chain_for_symbol(self, symbol: str):
+        key = _get_key(
+            self._get_contract_chain_for_symbol_uncached.__name__, (symbol,), {}
+        )
+        self.cache.store.pop(key, None)
 
     # def ib_get_contract_chain(
     #     self, ibcontract_pattern: Contract, allow_expired: bool = False
