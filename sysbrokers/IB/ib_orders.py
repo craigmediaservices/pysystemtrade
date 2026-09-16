@@ -1,7 +1,11 @@
 import asyncio
 import datetime
 
-from ib_async import Trade as ibTrade, OrderStatus as ibOrderStatus
+from ib_async import (
+    Trade as ibTrade,
+    OrderStatus as ibOrderStatus,
+    Contract as ibContract,
+)
 
 from sysbrokers.IB.ib_futures_contracts_data import ibFuturesContractData
 from sysbrokers.IB.ib_instruments_data import ibFuturesInstrumentData
@@ -93,6 +97,21 @@ def keys_for_db_broker_order(broker_order: brokerOrder) -> set:
 
 def keys_for_ib_trade(ib_trade: ibTrade) -> set:
     return open_order_keys_from_ib_trades([ib_trade])
+
+
+def contract_for_instrument_lookup(contract_with_legs) -> ibContract:
+    """
+    Which IB contract to identify the instrument from. A combo (BAG) has no
+    contract details of its own and IB never answers reqContractDetails for
+    it (2026-09-16: a three-hour hang, then 120s per combo order per pass
+    once the request timeout existed), so use the first resolved leg, which
+    is an ordinary futures contract.
+    """
+    contract = contract_with_legs.ibcontract
+    legs = contract_with_legs.legs
+    if getattr(contract, "secType", "") == "BAG" and isinstance(legs, list) and legs:
+        return legs[0]
+    return contract
 
 
 class ibOrderWithControls(orderWithControls):
@@ -274,11 +293,11 @@ class ibExecutionStackData(brokerExecutionStackData):
         """
         try:
             try:
-                ib_contract = (
-                    trade_with_contract_from_ib.ibcontract_with_legs.ibcontract
+                lookup_contract = contract_for_instrument_lookup(
+                    trade_with_contract_from_ib.ibcontract_with_legs
                 )
                 instrument_code = self.futures_instrument_data.get_instrument_code_from_broker_contract_object(
-                    ib_contract
+                    lookup_contract
                 )
             except:
                 raise ibOrderCouldntCreateException()
