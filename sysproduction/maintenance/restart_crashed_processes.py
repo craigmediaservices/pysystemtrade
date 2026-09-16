@@ -28,7 +28,6 @@ from sysproduction.data.control_process import dataControlProcess
 from sysproduction.maintenance import work_path
 from sysproduction.maintenance.health_check import (
     DAYTIME_PROCESSES,
-    SCRIPT_NAME,
     pid_alive,
     pid_runs_script,
     process_looks_hung,
@@ -45,6 +44,8 @@ MIN_MINUTES_BETWEEN = 20
 
 
 def load_restart_history() -> dict:
+    if not os.path.exists(STATE_FILE):
+        return {}
     try:
         with open(STATE_FILE) as f:
             raw = json.load(f)
@@ -52,14 +53,18 @@ def load_restart_history() -> dict:
             name: [datetime.datetime.fromisoformat(t) for t in stamps]
             for name, stamps in raw.items()
         }
-    except BaseException:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        # fail loud: an unreadable file would otherwise silently reset the budget
+        print("   WARNING restart history unreadable (%s): budget reset" % e)
         return {}
 
 
 def save_restart_history(history: dict):
     raw = {name: [t.isoformat() for t in stamps] for name, stamps in history.items()}
-    with open(STATE_FILE, "w") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(raw, f, indent=1)
+    os.replace(tmp, STATE_FILE)
 
 
 def restart_allowed(stamps: list, now: datetime.datetime) -> tuple:
@@ -140,10 +145,11 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
             print("   %s -> %s" % (msg, "would kill" if dry_run else "killing"))
             if not dry_run:
                 data.log.critical("%s; killing and restarting" % msg)
-                if not kill_process(c.process_id, SCRIPT_NAME.get(name, name)):
-                    print(
-                        "   could not kill pid %s (not the expected script?)"
-                        % c.process_id
+                # step 1 marks the dead pid closed, step 2 restarts within budget
+                if not kill_process(c.process_id, SCRIPT_FOR_PROCESS[name]):
+                    data.log.error(
+                        "%s: could not kill pid %s (not the expected script?); "
+                        "no restart" % (name, c.process_id)
                     )
 
         # step 1: interactive_controls 4/44

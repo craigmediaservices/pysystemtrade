@@ -3,13 +3,14 @@ from syscore.objects import (
     resolve_function,
 )
 from sysexecution.orders.named_order_objects import missing_order
-from sysproduction.data.controls import dataTradeLimits, limit_size_of_quantity
+from sysproduction.data.controls import dataTradeLimits
 
 from sysexecution.algos.allocate_algo_to_order import (
     check_and_if_required_allocate_algo_to_single_contract_order,
 )
 
 from sysexecution.orders.contract_orders import contractOrder, limit_order_type
+from sysexecution.trade_qty import tradeQuantity
 from sysexecution.orders.broker_orders import brokerOrder
 from sysexecution.order_stacks.instrument_order_stack import instrumentOrder
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
@@ -18,8 +19,34 @@ from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysproduction.data.controls import dataLocks
 
 
-# hard stop on a submit -> done-unfilled -> resubmit loop (unfilled children only)
-MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER = 6
+def cap_each_leg_to_instrument_limit(
+    proposed_order: contractOrder, data_trade_limits: dataTradeLimits
+) -> contractOrder:
+    """
+    Cap every leg at the instrument limit's remaining headroom, sign kept,
+    without the float ratio of the proportional resize (which floors a
+    [-22, 22] roll with headroom 15 to [-14, 14] and some to [0, 0]).
+    """
+    instrument_code = proposed_order.instrument_code
+    new_legs = []
+    for leg in proposed_order.trade:
+        leg = int(leg)
+        if leg == 0:
+            new_legs.append(0)
+            continue
+        possible = abs(
+            int(
+                data_trade_limits.what_trade_qty_possible_for_instrument_code(
+                    instrument_code, abs(leg)
+                )
+            )
+        )
+        capped = min(abs(leg), possible)
+        new_legs.append(capped if leg > 0 else -capped)
+
+    return proposed_order.replace_required_trade_size_only_use_for_unsubmitted_trades(
+        tradeQuantity(new_legs)
+    )
 
 
 class stackHandlerCreateBrokerOrders(stackHandlerForFills):
@@ -110,11 +137,6 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
             # would double up the trade
             return missing_order
 
-        if self.contract_order_has_too_many_children(original_contract_order):
-            # hard stop on a submit -> "done, unfilled" -> resubmit loop,
-            # independent of trade limits (which are charged on fills)
-            return missing_order
-
         # CHECK FOR LOCKS
         data_locks = dataLocks(self.data)
         instrument_locked = data_locks.is_instrument_locked(
@@ -156,48 +178,6 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
                 return True
 
         return False
-
-    def contract_order_has_too_many_children(
-        self, contract_order: contractOrder
-    ) -> bool:
-        """
-        Cap on UNFILLED broker orders per contract order. A submit -> "done,
-        unfilled" -> resubmit loop leaves a trail of zero-fill children; an
-        order legitimately worked in slices (36 one-lot fills for one
-        contract order on 2026-09-15) leaves filled ones, which do not count.
-        """
-        if contract_order.no_children():
-            return False
-        broker_orders = self.broker_stack.get_list_of_orders_from_order_id_list(
-            contract_order.children
-        )
-        n_unfilled = len(
-            [
-                o
-                for o in broker_orders
-                if o is not missing_order and o.fill.equals_zero()
-            ]
-        )
-        if n_unfilled < MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER:
-            return False
-        already = getattr(self, "_warned_child_cap", set())
-        log_attrs = {**contract_order.log_attributes(), "method": "temp"}
-        msg = (
-            "%s already has %d unfilled broker orders today (cap %d): not creating "
-            "more, check the broker for live orders and the log for rejections"
-            % (
-                str(contract_order),
-                n_unfilled,
-                MAX_UNFILLED_BROKER_ORDERS_PER_CONTRACT_ORDER,
-            )
-        )
-        if contract_order.order_id in already:
-            self.log.debug(msg, **log_attrs)
-        else:
-            self.log.critical(msg, **log_attrs)
-            already.add(contract_order.order_id)
-            self._warned_child_cap = already
-        return True
 
     def _log_open_child_block_once(
         self, contract_order: contractOrder, broker_order: brokerOrder
@@ -259,23 +239,34 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
         instrument_strategy = proposed_order.instrument_strategy
 
         if proposed_order.roll_order:
-            # A roll is sized by the position being rolled (largest leg), see
-            # limit_size_of_quantity; the instrument limit still applies, so
-            # setting it to 0 still stops a roll.
-            roll_size = limit_size_of_quantity(proposed_order, proposed_order.trade)
-            possible_size = (
-                data_trade_limits.what_trade_qty_possible_for_instrument_code(
-                    proposed_order.instrument_code, roll_size
-                )
+            # Roll orders (generated from an existing position) are checked
+            # against the instrument limit's remaining headroom leg by leg,
+            # so limit 0 still stops a roll, but their fills are not charged
+            # (see stackHandlerForFills): a roll must not consume the day's
+            # budget for strategy trades, and a two-leg outright roll must
+            # not starve its own second leg.
+            contract_order_after_trade_limits = cap_each_leg_to_instrument_limit(
+                proposed_order, data_trade_limits
             )
-            maximum_abs_qty = abs(int(possible_size)) * len(proposed_order.trade)
-        else:
-            # proposed_order.trade.total_abs_qty() is a scalar, returns a scalar
-            maximum_abs_qty = (
-                data_trade_limits.what_trade_is_possible_for_strategy_instrument(
-                    instrument_strategy, proposed_order.trade
+            if contract_order_after_trade_limits.trade != proposed_order.trade:
+                self.log.debug(
+                    "%s roll trade change from %s to %s because of instrument trade limit"
+                    % (
+                        proposed_order.key,
+                        str(proposed_order.trade),
+                        str(contract_order_after_trade_limits.trade),
+                    ),
+                    **proposed_order.log_attributes(),
+                    method="temp",
                 )
+            return contract_order_after_trade_limits
+
+        # proposed_order.trade.total_abs_qty() is a scalar, returns a scalar
+        maximum_abs_qty = (
+            data_trade_limits.what_trade_is_possible_for_strategy_instrument(
+                instrument_strategy, proposed_order.trade
             )
+        )
 
         contract_order_after_trade_limits = (
             proposed_order.change_trade_size_proportionally_to_meet_abs_qty_limit(

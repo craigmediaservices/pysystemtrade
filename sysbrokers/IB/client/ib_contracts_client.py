@@ -1,7 +1,6 @@
 from copy import copy
 from ib_async import Contract
 
-from syscore.cache import _get_key
 from syscore.cache import Cache
 from syscore.exceptions import missingData, missingContract
 from sysbrokers.IB.client.ib_client import ibClient
@@ -604,10 +603,7 @@ class ibContractsClient(ibClient):
         return contract_chain
 
     def _forget_contract_chain_for_symbol(self, symbol: str):
-        key = _get_key(
-            self._get_contract_chain_for_symbol_uncached.__name__, (symbol,), {}
-        )
-        self.cache.store.pop(key, None)
+        self.cache.forget(self._get_contract_chain_for_symbol_uncached, symbol)
 
     # def ib_get_contract_chain(
     #     self, ibcontract_pattern: Contract, allow_expired: bool = False

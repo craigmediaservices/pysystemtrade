@@ -1,3 +1,4 @@
+import asyncio
 from sysexecution.stack_handler.spawn_children_from_instrument_orders import (
     stackHandlerForSpawning,
 )
@@ -28,7 +29,19 @@ class stackHandler(
         self.log.debug("Running safe stack removal")
         # First, cancel any partially or unfilled broker orders
         self.log.debug("Trying to cancel all broker orders")
-        self.cancel_and_confirm_all_broker_orders(log_critical_on_timeout=True)
+        try:
+            self.cancel_and_confirm_all_broker_orders(log_critical_on_timeout=True)
+        except (asyncio.TimeoutError, TimeoutError):
+            unfilled = [
+                str(o)
+                for o in self.broker_stack.get_list_of_orders()
+                if not o.fill_equals_desired_trade()
+            ]
+            self.log.critical(
+                "IB stopped answering during end-of-day cancellation; these broker "
+                "orders may still be working at the broker: %s" % unfilled
+            )
+            raise
 
         # Next, process fills
         self.log.debug("Processing fills")

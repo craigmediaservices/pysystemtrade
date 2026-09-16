@@ -100,22 +100,20 @@ def _exec_stack(open_keys):
     return stack
 
 
-def test_unanswered_open_order_request_means_assume_open():
-    stack = _exec_stack(open_keys=None)
-    assert stack._any_key_open_at_broker({("perm", 1)})
-
-
 def test_answered_request_is_matched_normally():
     stack = _exec_stack(open_keys={("perm", 1)})
     assert stack._any_key_open_at_broker({("perm", 1)})
     assert not stack._any_key_open_at_broker({("perm", 2)})
 
 
-def test_timeout_from_ib_returns_none_not_exception():
+def test_timeout_from_ib_is_fatal_and_logged_critical():
+    # a stalled reply can poison the next request, so the process must die
+    # visibly rather than carry on with an unreliable connection
     stack = object.__new__(ibExecutionStackData)
     stack.log = mock.MagicMock()
     ib = mock.MagicMock()
     ib.reqAllOpenOrders.side_effect = asyncio.TimeoutError()
     stack._ib_client = SimpleNamespace(ib=ib)
-    assert stack.get_open_order_keys_from_broker() is None
-    stack.log.warning.assert_called_once()
+    with pytest.raises(asyncio.TimeoutError):
+        stack.get_open_order_keys_from_broker()
+    stack.log.critical.assert_called_once()

@@ -20,6 +20,7 @@ from sysproduction.data.positions import updatePositions
 from sysproduction.data.controls import (
     dataLocks,
     dataTradeLimits,
+    is_roll_order,
     limit_size_of_quantity,
 )
 from sysexecution.orders.base_orders import overFilledOrder
@@ -121,17 +122,27 @@ class stackHandlerForFills(stackHandlerForCompletions):
         """
         Trade limits are charged here, on fills as they land in the database,
         whether they arrive while an algo is managing the order or after it
-        gave up. Unfilled (cancelled, rejected) orders cost nothing.
+        gave up. Unfilled (cancelled, rejected) orders cost nothing. Roll
+        orders are not charged (checked leg by leg instead, see
+        cap_each_leg_to_instrument_limit) and neither are manual fills, which
+        are repairs, not trading.
         """
         if db_order_before is missing_order or db_order_after is missing_order:
             return None
-        before = limit_size_of_quantity(db_order_after, db_order_before.fill)
-        after = limit_size_of_quantity(db_order_after, db_order_after.fill)
-        delta = after - before
+        if is_roll_order(db_order_after) or db_order_after.manual_fill:
+            return None
+        delta = limit_size_of_quantity(db_order_after.fill) - limit_size_of_quantity(
+            db_order_before.fill
+        )
         if delta <= 0:
             return None
         dataTradeLimits(self.data).add_trade_quantity(
             db_order_after.instrument_strategy, delta
+        )
+        self.log.debug(
+            "Charged %d to trade limits for %s" % (delta, str(db_order_after)),
+            **db_order_after.log_attributes(),
+            method="temp",
         )
 
     def pass_fills_from_broker_up_to_contract(self):

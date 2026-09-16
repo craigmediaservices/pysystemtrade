@@ -7,6 +7,7 @@ orders, and what is sitting on the order stacks.
 """
 import datetime
 import os
+import socket
 import sys
 
 from sysdata.data_blob import dataBlob
@@ -78,28 +79,31 @@ def minutes_since_last_log_line(tag: str, now: datetime.datetime):
     return None
 
 
-# the log pipeline itself must have produced a line this recently, from any
-# process, before one process's silence is read as a hang
-LOG_PIPELINE_STALE_MINUTES = 5
 # a freshly started process is given this long before silence counts
 HANG_GRACE_MINUTES = 10
-# wrapper script names, checked in /proc/<pid>/cmdline before a kill
-SCRIPT_NAME = {"run_stack_handler": "run_stack_handler"}
+# the log server every process writes through (syslogging/logging_prod.yaml)
+LOG_SERVER = ("localhost", 6020)
 
 
-def minutes_since_any_log_line(now: datetime.datetime):
+def log_server_reachable(address=LOG_SERVER, timeout_seconds: float = 2.0) -> bool:
+    """
+    Every process logs through a socket handler to this server. If it is
+    down, silence in the log file means nothing, so the hang detector must
+    not judge. (An mtime-based 'did anyone log recently' gate is blind in
+    the evening, when the stack handler is the only writer.)
+    """
     try:
-        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(LOG_FILE))
-    except BaseException:
-        return None
-    return (now - mtime).total_seconds() / 60.0
+        with socket.create_connection(address, timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
 
 
 def pid_runs_script(pid, script_name: str) -> bool:
     try:
         with open("/proc/%d/cmdline" % int(float(pid)), "rb") as f:
             cmdline = f.read().decode("utf-8", errors="replace")
-    except BaseException:
+    except (OSError, ValueError, TypeError):
         return False
     return script_name in cmdline
 
@@ -109,19 +113,12 @@ def longest_running_method_minutes(control_record, now: datetime.datetime):
     Minutes the longest currently-running method of a process has been
     running per the control table, or None if nothing is marked running.
     """
-    try:
-        methods = control_record.running_methods
-        names = list(methods.as_dict().keys())
-    except BaseException:
-        return None
+    methods = control_record.running_methods
     longest = None
-    for name in names:
-        try:
-            if not methods.currently_running(name):
-                continue
-            started = methods.when_last_start_run(name)
-        except BaseException:
+    for name in list(methods.as_dict().keys()):
+        if not methods.currently_running(name):
             continue
+        started = methods.when_last_start_run(name)
         minutes = (now - started).total_seconds() / 60.0
         if longest is None or minutes > longest:
             longest = minutes
@@ -132,10 +129,10 @@ def process_looks_hung(name: str, control_record, now: datetime.datetime) -> tup
     """
     (hung, detail). Hung = expected to be logging, alive, started more than
     HANG_GRACE_MINUTES ago, no log line for SILENT_MINUTES, WHILE the log
-    pipeline is demonstrably alive (some process logged recently) AND the
-    control table shows a method stuck running for at least as long. Log
-    silence alone is not enough: a dead log server must not get a healthy
-    process killed. Added after 2026-09-16 (three hours alive-but-hung).
+    server is reachable AND the control table shows a method stuck running
+    for at least as long. Log silence alone is not enough: a dead log
+    server must not get a healthy process killed. Added after 2026-09-16
+    (three hours alive-but-hung).
     """
     tag = LOG_TAGS.get(name)
     if tag is None:
@@ -146,11 +143,8 @@ def process_looks_hung(name: str, control_record, now: datetime.datetime) -> tup
     silent = minutes_since_last_log_line(tag, now)
     if silent is None or silent <= SILENT_MINUTES:
         return False, "logged %s min ago" % ("?" if silent is None else int(silent))
-    pipeline = minutes_since_any_log_line(now)
-    if pipeline is None or pipeline > LOG_PIPELINE_STALE_MINUTES:
-        return False, "log pipeline stale (%s min): cannot judge" % (
-            "?" if pipeline is None else int(pipeline)
-        )
+    if not log_server_reachable():
+        return False, "log server unreachable: cannot judge"
     stuck = longest_running_method_minutes(control_record, now)
     if stuck is None or stuck < SILENT_MINUTES:
         return False, "silent %d min but no method stuck (%s)" % (

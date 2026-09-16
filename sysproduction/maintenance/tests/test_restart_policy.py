@@ -70,42 +70,51 @@ def _record(started_minutes_ago, running_for=None):
     )
 
 
-def _judge(record, silent, pipeline):
+def _judge(record, silent, log_server_up=True):
     with mock.patch.object(
         hc, "minutes_since_last_log_line", return_value=silent
-    ), mock.patch.object(hc, "minutes_since_any_log_line", return_value=pipeline):
+    ), mock.patch.object(hc, "log_server_reachable", return_value=log_server_up):
         return hc.process_looks_hung("run_stack_handler", record, NOW)
 
 
-def test_hung_when_silent_pipeline_alive_and_method_stuck():
-    hung, detail = _judge(_record(180, running_for=170), silent=170, pipeline=1)
+def test_hung_when_silent_log_server_up_and_method_stuck():
+    hung, detail = _judge(_record(180, running_for=170), silent=170)
     assert hung and "170" in detail
 
 
 def test_recently_started_process_is_never_hung():
-    hung, _ = _judge(_record(3, running_for=3), silent=999, pipeline=1)
+    hung, _ = _judge(_record(3, running_for=3), silent=999)
     assert not hung
 
 
 def test_recently_logging_process_is_not_hung():
-    hung, _ = _judge(_record(180, running_for=170), silent=2, pipeline=1)
+    hung, _ = _judge(_record(180, running_for=170), silent=2)
     assert not hung
 
 
-def test_dead_log_pipeline_means_cannot_judge():
-    # nothing at all has logged for a while: the log server is the problem
-    hung, detail = _judge(_record(180, running_for=170), silent=170, pipeline=40)
-    assert not hung and "pipeline" in detail
+def test_dead_log_server_means_cannot_judge():
+    hung, detail = _judge(
+        _record(180, running_for=170), silent=170, log_server_up=False
+    )
+    assert not hung and "log server" in detail
 
 
 def test_silence_without_a_stuck_method_is_not_a_hang():
-    hung, detail = _judge(_record(180, running_for=None), silent=170, pipeline=1)
+    hung, detail = _judge(_record(180, running_for=None), silent=170)
     assert not hung and "no method stuck" in detail
 
 
 def test_short_running_method_is_not_stuck():
-    hung, _ = _judge(_record(180, running_for=4), silent=170, pipeline=1)
+    hung, _ = _judge(_record(180, running_for=4), silent=170)
     assert not hung
+
+
+def test_unreadable_history_resets_budget_loudly(tmp_path, capsys):
+    state = tmp_path / "restart_state.json"
+    state.write_text("{not json")
+    with mock.patch.object(rcp, "STATE_FILE", str(state)):
+        assert rcp.load_restart_history() == {}
+    assert "unreadable" in capsys.readouterr().out
 
 
 def test_processes_without_a_log_tag_are_not_judged():

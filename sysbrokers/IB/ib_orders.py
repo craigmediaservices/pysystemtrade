@@ -550,19 +550,14 @@ class ibExecutionStackData(brokerExecutionStackData):
         if len(keys) == 0:
             return False
         open_keys = self.get_open_order_keys_from_broker()
-        if open_keys is None:
-            # broker did not answer: assume the order is still open (fail
-            # closed - no duplicate order, cancel-wait keeps waiting)
-            return True
 
         return len(keys.intersection(open_keys)) > 0
 
-    def get_open_order_keys_from_broker(self):
+    def get_open_order_keys_from_broker(self) -> set:
         """
         Fresh reqAllOpenOrders (all clients), cached for OPEN_ORDER_CACHE_SECONDS
-        because the stack handler asks several times per pass. Returns None if
-        IB did not answer within the request timeout: callers must treat that
-        as 'unknown', never as 'no open orders'.
+        because the stack handler asks several times per pass. A request that
+        times out is fatal for this process (see below).
         """
         now = datetime.datetime.now()
         cached = getattr(self, "_open_order_keys_cache", None)
@@ -575,11 +570,18 @@ class ibExecutionStackData(brokerExecutionStackData):
         try:
             list_of_ib_trades = self.ib_client.ib.reqAllOpenOrders()
         except (asyncio.TimeoutError, TimeoutError):
-            self.log.warning(
+            # A stalled reply can still arrive later and resolve the NEXT
+            # request early with a partial list (ib_async keeps one future
+            # per request type), so the connection cannot be trusted after
+            # this. Die visibly; the restart tooling brings the process back
+            # on a fresh connection. Algo-controlled contract orders stay
+            # locked, so nothing is duplicated, and fills for orders still
+            # working at IB are matched by the next incarnation.
+            self.log.critical(
                 "IB did not answer reqAllOpenOrders within the request timeout: "
-                "treating orders as still open"
+                "connection unreliable, stopping this process"
             )
-            return None
+            raise
         keys = open_order_keys_from_ib_trades(list_of_ib_trades)
         self._open_order_keys_cache = (now, keys)
 
