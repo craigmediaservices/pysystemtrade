@@ -36,6 +36,15 @@ from sysobjects.production.trading_hours.trading_hours import listOfTradingHours
 from sysexecution.trade_qty import tradeQuantity
 
 
+def _contract_with_conid(contract_chain: list, conId) -> Contract:
+    conId_list = [contract.conId for contract in contract_chain]
+    try:
+        contract_idx = conId_list.index(conId)
+    except ValueError:
+        raise missingContract
+    return contract_chain[contract_idx]
+
+
 class ibContractsClient(ibClient):
     def broker_get_futures_contract_list(
         self,
@@ -571,21 +580,30 @@ class ibContractsClient(ibClient):
 
     def ib_get_contract_with_conId(self, symbol: str, conId) -> Contract:
         contract_chain = self._get_contract_chain_for_symbol(symbol)
-        conId_list = [contract.conId for contract in contract_chain]
         try:
-            contract_idx = conId_list.index(conId)
-        except ValueError:
-            raise missingContract
+            return _contract_with_conid(contract_chain, conId)
+        except missingContract:
+            pass
+        # the cached chain may be stale or partial: refetch once before giving up
+        self._forget_contract_chain_for_symbol(symbol)
+        contract_chain = self._get_contract_chain_for_symbol(symbol)
 
-        required_contract = contract_chain[contract_idx]
-
-        return required_contract
+        return _contract_with_conid(contract_chain, conId)
 
     def _get_contract_chain_for_symbol(self, symbol: str) -> list:
+        # Cached per symbol for the life of the process (self.cache, as for
+        # resolved contracts): combo-leg resolution fetched the same chain
+        # for every leg of every combo order the broker returned.
+        return self.cache.get(self._get_contract_chain_for_symbol_uncached, symbol)
+
+    def _get_contract_chain_for_symbol_uncached(self, symbol: str) -> list:
         ibcontract_pattern = ib_futures_instrument_just_symbol(symbol)
         contract_chain = self.ib_get_contract_chain(ibcontract_pattern)
 
         return contract_chain
+
+    def _forget_contract_chain_for_symbol(self, symbol: str):
+        self.cache.forget(self._get_contract_chain_for_symbol_uncached, symbol)
 
     # def ib_get_contract_chain(
     #     self, ibcontract_pattern: Contract, allow_expired: bool = False

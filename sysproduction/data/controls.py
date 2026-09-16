@@ -41,6 +41,7 @@ from sysdata.data_blob import dataBlob
 
 from sysexecution.trade_qty import tradeQuantity
 from sysexecution.orders.broker_orders import brokerOrder
+from sysobjects.production.tradeable_object import instrumentStrategy
 from sysexecution.orders.instrument_orders import instrumentOrder
 from sysexecution.orders.list_of_orders import (
     listOfOrders,
@@ -118,6 +119,16 @@ class dataLocks(productionDataLayerGeneric):
         return self.db_lock_data.get_list_of_locked_instruments()
 
 
+def is_roll_order(order) -> bool:
+    """brokerOrder carries roll_order only in order_info; contractOrder has a property."""
+    return bool(order.order_info.get("roll_order", False))
+
+
+def limit_size_of_quantity(qty) -> int:
+    """How much of a trade limit a (strategy) quantity uses: total absolute size."""
+    return int(tradeQuantity(qty).total_abs_qty())
+
+
 class dataTradeLimits(productionDataLayerGeneric):
     def _add_required_classes_to_data(self, data) -> dataBlob:
         data.add_class_object(mongoTradeLimitData)
@@ -158,17 +169,15 @@ class dataTradeLimits(productionDataLayerGeneric):
 
         return possible_trade
 
-    def add_trade(self, executed_order: brokerOrder):
-        trade_size = executed_order.trade.total_abs_qty()
-        instrument_strategy = executed_order.instrument_strategy
-
-        self.db_trade_limit_data.add_trade(instrument_strategy, trade_size)
-
-    def remove_trade(self, order: brokerOrder):
-        instrument_strategy = order.instrument_strategy
-        trade = order.trade.total_abs_qty()
-
-        self.db_trade_limit_data.remove_trade(instrument_strategy, trade)
+    def add_trade_quantity(self, instrument_strategy: instrumentStrategy, size: int):
+        """
+        Charged by stackHandlerForFills as fills land in the database. Roll
+        orders and manual fills are not charged (see
+        charge_new_fills_to_trade_limits).
+        """
+        if size <= 0:
+            return None
+        self.db_trade_limit_data.add_trade(instrument_strategy, int(size))
 
     def get_all_limits_sorted(self) -> list:
         all_limits = self.get_all_limits()

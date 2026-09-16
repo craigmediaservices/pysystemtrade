@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 
 from ib_async import Trade as ibTrade, OrderStatus as ibOrderStatus
@@ -555,7 +556,8 @@ class ibExecutionStackData(brokerExecutionStackData):
     def get_open_order_keys_from_broker(self) -> set:
         """
         Fresh reqAllOpenOrders (all clients), cached for OPEN_ORDER_CACHE_SECONDS
-        because the stack handler asks several times per pass.
+        because the stack handler asks several times per pass. A request that
+        times out is fatal for this process (see below).
         """
         now = datetime.datetime.now()
         cached = getattr(self, "_open_order_keys_cache", None)
@@ -565,7 +567,21 @@ class ibExecutionStackData(brokerExecutionStackData):
             if age < OPEN_ORDER_CACHE_SECONDS:
                 return keys
 
-        list_of_ib_trades = self.ib_client.ib.reqAllOpenOrders()
+        try:
+            list_of_ib_trades = self.ib_client.ib.reqAllOpenOrders()
+        except (asyncio.TimeoutError, TimeoutError):
+            # A stalled reply can still arrive later and resolve the NEXT
+            # request early with a partial list (ib_async keeps one future
+            # per request type), so the connection cannot be trusted after
+            # this. Die visibly; the restart tooling brings the process back
+            # on a fresh connection. Algo-controlled contract orders stay
+            # locked, so nothing is duplicated, and fills for orders still
+            # working at IB are matched by the next incarnation.
+            self.log.critical(
+                "IB did not answer reqAllOpenOrders within the request timeout: "
+                "connection unreliable, stopping this process"
+            )
+            raise
         keys = open_order_keys_from_ib_trades(list_of_ib_trades)
         self._open_order_keys_cache = (now, keys)
 

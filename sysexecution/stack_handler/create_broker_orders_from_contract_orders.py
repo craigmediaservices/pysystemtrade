@@ -10,12 +10,43 @@ from sysexecution.algos.allocate_algo_to_order import (
 )
 
 from sysexecution.orders.contract_orders import contractOrder, limit_order_type
+from sysexecution.trade_qty import tradeQuantity
 from sysexecution.orders.broker_orders import brokerOrder
 from sysexecution.order_stacks.instrument_order_stack import instrumentOrder
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
 from sysexecution.algos.algo import Algo
 from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysproduction.data.controls import dataLocks
+
+
+def cap_each_leg_to_instrument_limit(
+    proposed_order: contractOrder, data_trade_limits: dataTradeLimits
+) -> contractOrder:
+    """
+    Cap every leg at the instrument limit's remaining headroom, sign kept,
+    without the float ratio of the proportional resize (which floors a
+    [-22, 22] roll with headroom 15 to [-14, 14] and some to [0, 0]).
+    """
+    instrument_code = proposed_order.instrument_code
+    new_legs = []
+    for leg in proposed_order.trade:
+        leg = int(leg)
+        if leg == 0:
+            new_legs.append(0)
+            continue
+        possible = abs(
+            int(
+                data_trade_limits.what_trade_qty_possible_for_instrument_code(
+                    instrument_code, abs(leg)
+                )
+            )
+        )
+        capped = min(abs(leg), possible)
+        new_legs.append(capped if leg > 0 else -capped)
+
+    return proposed_order.replace_required_trade_size_only_use_for_unsubmitted_trades(
+        tradeQuantity(new_legs)
+    )
 
 
 class stackHandlerCreateBrokerOrders(stackHandlerForFills):
@@ -207,6 +238,29 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
 
         instrument_strategy = proposed_order.instrument_strategy
 
+        if proposed_order.roll_order:
+            # Roll orders (generated from an existing position) are checked
+            # against the instrument limit's remaining headroom leg by leg,
+            # so limit 0 still stops a roll, but their fills are not charged
+            # (see stackHandlerForFills): a roll must not consume the day's
+            # budget for strategy trades, and a two-leg outright roll must
+            # not starve its own second leg.
+            contract_order_after_trade_limits = cap_each_leg_to_instrument_limit(
+                proposed_order, data_trade_limits
+            )
+            if contract_order_after_trade_limits.trade != proposed_order.trade:
+                self.log.debug(
+                    "%s roll trade change from %s to %s because of instrument trade limit"
+                    % (
+                        proposed_order.key,
+                        str(proposed_order.trade),
+                        str(contract_order_after_trade_limits.trade),
+                    ),
+                    **proposed_order.log_attributes(),
+                    method="temp",
+                )
+            return contract_order_after_trade_limits
+
         # proposed_order.trade.total_abs_qty() is a scalar, returns a scalar
         maximum_abs_qty = (
             data_trade_limits.what_trade_is_possible_for_strategy_instrument(
@@ -374,8 +428,8 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
     ):
         broker_order = completed_broker_order_with_controls.order
 
-        # update trade limits
-        self.add_trade_to_trade_limits(broker_order)
+        # trade limits are charged as fills land in the database
+        # (stackHandlerForFills.apply_broker_order_fills_to_database)
 
         # apply fills and commissions
         self.apply_broker_order_fills_to_database(
@@ -388,8 +442,3 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
         self.log.debug(
             "Released contract order %s from algo control" % contract_order_id
         )
-
-    def add_trade_to_trade_limits(self, executed_order: brokerOrder):
-        data_trade_limits = dataTradeLimits(self.data)
-
-        data_trade_limits.add_trade(executed_order)

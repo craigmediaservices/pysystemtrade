@@ -7,6 +7,7 @@ orders, and what is sitting on the order stacks.
 """
 import datetime
 import os
+import socket
 import sys
 
 from sysdata.data_blob import dataBlob
@@ -78,6 +79,84 @@ def minutes_since_last_log_line(tag: str, now: datetime.datetime):
     return None
 
 
+# a freshly started process is given this long before silence counts
+HANG_GRACE_MINUTES = 10
+# the log server every process writes through (syslogging/logging_prod.yaml)
+LOG_SERVER = ("localhost", 6020)
+
+
+def log_server_reachable(address=LOG_SERVER, timeout_seconds: float = 2.0) -> bool:
+    """
+    Every process logs through a socket handler to this server. If it is
+    down, silence in the log file means nothing, so the hang detector must
+    not judge. (An mtime-based 'did anyone log recently' gate is blind in
+    the evening, when the stack handler is the only writer.)
+    """
+    try:
+        with socket.create_connection(address, timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
+def pid_runs_script(pid, script_name: str) -> bool:
+    try:
+        with open("/proc/%d/cmdline" % int(float(pid)), "rb") as f:
+            cmdline = f.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError, TypeError):
+        return False
+    return script_name in cmdline
+
+
+def longest_running_method_minutes(control_record, now: datetime.datetime):
+    """
+    Minutes the longest currently-running method of a process has been
+    running per the control table, or None if nothing is marked running.
+    """
+    methods = control_record.running_methods
+    longest = None
+    for name in list(methods.as_dict().keys()):
+        if not methods.currently_running(name):
+            continue
+        started = methods.when_last_start_run(name)
+        minutes = (now - started).total_seconds() / 60.0
+        if longest is None or minutes > longest:
+            longest = minutes
+    return longest
+
+
+def process_looks_hung(name: str, control_record, now: datetime.datetime) -> tuple:
+    """
+    (hung, detail). Hung = expected to be logging, alive, started more than
+    HANG_GRACE_MINUTES ago, no log line for SILENT_MINUTES, WHILE the log
+    server is reachable AND the control table shows a method stuck running
+    for at least as long. Log silence alone is not enough: a dead log
+    server must not get a healthy process killed. Added after 2026-09-16
+    (three hours alive-but-hung).
+    """
+    tag = LOG_TAGS.get(name)
+    if tag is None:
+        return False, "no log tag"
+    started_min_ago = (now - control_record.last_start_time).total_seconds() / 60.0
+    if started_min_ago < HANG_GRACE_MINUTES:
+        return False, "started %d min ago" % int(started_min_ago)
+    silent = minutes_since_last_log_line(tag, now)
+    if silent is None or silent <= SILENT_MINUTES:
+        return False, "logged %s min ago" % ("?" if silent is None else int(silent))
+    if not log_server_reachable():
+        return False, "log server unreachable: cannot judge"
+    stuck = longest_running_method_minutes(control_record, now)
+    if stuck is None or stuck < SILENT_MINUTES:
+        return False, "silent %d min but no method stuck (%s)" % (
+            int(silent),
+            "none running" if stuck is None else "%d min" % int(stuck),
+        )
+    return True, "no log line for %d min, method running %d min" % (
+        int(silent),
+        int(stuck),
+    )
+
+
 def should_be_running(control, name: str, now: datetime.datetime) -> bool:
     # start/stop times live on diagControlProcess (config), not dataControlProcess
     # (DB state). Until 2026-09-14 this called the wrong class, swallowed the
@@ -113,12 +192,11 @@ def health_check(verbose: bool = True) -> list:
                 flag += "  <-- status %s" % c.status
                 problems.append("%s status %s" % (name, c.status))
             if expected and alive and name in LOG_TAGS:
-                age = minutes_since_last_log_line(LOG_TAGS[name], now)
-                if age is not None and age > SILENT_MINUTES:
-                    flag += "  <-- ALIVE BUT SILENT %d min (hung?)" % int(age)
+                hung, detail = process_looks_hung(name, c, now)
+                if hung:
+                    flag += "  <-- HUNG: %s" % detail
                     problems.append(
-                        "%s alive but no log line for %d min: probably hung, "
-                        "kill -9 and restart" % (name, int(age))
+                        "%s alive but hung (%s): kill -9 and restart" % (name, detail)
                     )
             if verbose:
                 print(

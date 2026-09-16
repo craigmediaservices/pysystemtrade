@@ -40,6 +40,10 @@ class Cache(object):
 
         return value
 
+    def forget(self, function_instance, *args, **kwargs):
+        key = _get_key(function_instance.__name__, args, kwargs)
+        self.store.pop(key, None)
+
     def _put_in_store(self, key: str, value):
         self.store[key] = value
 

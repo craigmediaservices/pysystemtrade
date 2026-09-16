@@ -16,6 +16,26 @@ from syslogging.logger import *
 from sysdata.config.production_config import get_production_config
 
 
+DEFAULT_IB_REQUEST_TIMEOUT_SECONDS = 120.0
+
+
+def get_ib_request_timeout_seconds() -> float:
+    """
+    Seconds a blocking IB request may take before ib_async raises. Override
+    with 'ib_request_timeout_seconds' in private config; 0 means wait forever.
+    Generous because historical-data requests can legitimately take tens of
+    seconds. A request that does time out raises asyncio.TimeoutError from
+    the ib_async call; the open-order checks catch it and assume orders are
+    still open, anywhere else it ends the process (visible, restartable)
+    rather than hanging it invisibly.
+    """
+    config = get_production_config()
+    value = config.get_element_or_default(
+        "ib_request_timeout_seconds", DEFAULT_IB_REQUEST_TIMEOUT_SECONDS
+    )
+    return float(value)
+
+
 class connectionIB(object):
     """
     Connection object for connecting IB
@@ -94,6 +114,11 @@ class connectionIB(object):
 
         # Sometimes takes a few seconds to resolve... only have to do this once per process so no biggie
         time.sleep(5)
+
+        # A request IB never answers must raise, not hang the process forever.
+        # ib_async defaults to 0 (= wait forever): on 2026-09-16 run_stack_handler
+        # sat alive-but-idle for three hours on one unanswered reqContractDetails.
+        ib.RequestTimeout = get_ib_request_timeout_seconds()
 
         self._ib = ib
         self._account = account

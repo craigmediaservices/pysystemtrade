@@ -17,7 +17,12 @@ from sysexecution.orders.list_of_orders import listOfOrders
 from sysexecution.trade_qty import tradeQuantity
 
 from sysproduction.data.positions import updatePositions
-from sysproduction.data.controls import dataLocks
+from sysproduction.data.controls import (
+    dataLocks,
+    dataTradeLimits,
+    is_roll_order,
+    limit_size_of_quantity,
+)
 from sysexecution.orders.base_orders import overFilledOrder
 
 
@@ -78,6 +83,9 @@ class stackHandlerForFills(stackHandlerForCompletions):
             data_broker.calculate_total_commission_for_broker_order(broker_order)
         )
 
+        db_order_before = self.broker_stack.get_order_with_id_from_stack(
+            broker_order_id
+        )
         try:
             # This will add commissions, fills, etc
             self.broker_stack.add_execution_details_from_matched_broker_order(
@@ -89,6 +97,13 @@ class stackHandlerForFills(stackHandlerForCompletions):
                 % (broker_order)
             )
             return None
+
+        self.charge_new_fills_to_trade_limits(
+            db_order_before=db_order_before,
+            db_order_after=self.broker_stack.get_order_with_id_from_stack(
+                broker_order_id
+            ),
+        )
 
         contract_order_id = broker_order.parent
 
@@ -102,6 +117,33 @@ class stackHandlerForFills(stackHandlerForCompletions):
         else:
             # pass broker fills upwards
             self.apply_broker_fills_to_contract_order(contract_order_id)
+
+    def charge_new_fills_to_trade_limits(self, db_order_before, db_order_after):
+        """
+        Trade limits are charged here, on fills as they land in the database,
+        whether they arrive while an algo is managing the order or after it
+        gave up. Unfilled (cancelled, rejected) orders cost nothing. Roll
+        orders are not charged (checked leg by leg instead, see
+        cap_each_leg_to_instrument_limit) and neither are manual fills, which
+        are repairs, not trading.
+        """
+        if db_order_before is missing_order or db_order_after is missing_order:
+            return None
+        if is_roll_order(db_order_after) or db_order_after.manual_fill:
+            return None
+        delta = limit_size_of_quantity(db_order_after.fill) - limit_size_of_quantity(
+            db_order_before.fill
+        )
+        if delta <= 0:
+            return None
+        dataTradeLimits(self.data).add_trade_quantity(
+            db_order_after.instrument_strategy, delta
+        )
+        self.log.debug(
+            "Charged %d to trade limits for %s" % (delta, str(db_order_after)),
+            **db_order_after.log_attributes(),
+            method="temp",
+        )
 
     def pass_fills_from_broker_up_to_contract(self):
         list_of_contract_order_ids = self.contract_stack.get_list_of_order_ids()
