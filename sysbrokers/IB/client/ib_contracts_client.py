@@ -1,3 +1,4 @@
+import datetime
 from copy import copy
 from ib_async import Contract
 
@@ -34,6 +35,9 @@ from sysobjects.production.trading_hours.weekly_trading_hours_any_day import (
 )
 from sysobjects.production.trading_hours.trading_hours import listOfTradingHours
 from sysexecution.trade_qty import tradeQuantity
+
+
+CONTRACT_CHAIN_CACHE_SECONDS = 3600.0
 
 
 class ibContractsClient(ibClient):
@@ -582,10 +586,34 @@ class ibContractsClient(ibClient):
         return required_contract
 
     def _get_contract_chain_for_symbol(self, symbol: str) -> list:
+        # Cached per symbol: resolving the legs of every combo order the
+        # broker returns asked IB for the same chain 26 times in one second
+        # on 2026-09-16, after which IB stopped answering.
+        cached = self._contract_chain_cache_get(symbol)
+        if cached is not None:
+            return cached
+
         ibcontract_pattern = ib_futures_instrument_just_symbol(symbol)
         contract_chain = self.ib_get_contract_chain(ibcontract_pattern)
+        self._contract_chain_cache_put(symbol, contract_chain)
 
         return contract_chain
+
+    def _contract_chain_cache_get(self, symbol: str):
+        cache = getattr(self, "_contract_chain_cache", {})
+        entry = cache.get(symbol)
+        if entry is None:
+            return None
+        stored_at, chain = entry
+        age = (datetime.datetime.now() - stored_at).total_seconds()
+        if age > CONTRACT_CHAIN_CACHE_SECONDS:
+            return None
+        return chain
+
+    def _contract_chain_cache_put(self, symbol: str, chain: list):
+        cache = getattr(self, "_contract_chain_cache", {})
+        cache[symbol] = (datetime.datetime.now(), chain)
+        self._contract_chain_cache = cache
 
     # def ib_get_contract_chain(
     #     self, ibcontract_pattern: Contract, allow_expired: bool = False

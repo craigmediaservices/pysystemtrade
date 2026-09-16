@@ -159,7 +159,12 @@ class dataTradeLimits(productionDataLayerGeneric):
         return possible_trade
 
     def add_trade(self, executed_order: brokerOrder):
-        trade_size = executed_order.trade.total_abs_qty()
+        # Count what was FILLED, not what was submitted: an order cancelled
+        # unfilled (algo timeout, end-of-day sweep) used to consume the
+        # day's limit anyway, so a stalled roll leg zeroed itself out.
+        trade_size = executed_order.fill.total_abs_qty()
+        if trade_size == 0:
+            return None
         instrument_strategy = executed_order.instrument_strategy
 
         self.db_trade_limit_data.add_trade(instrument_strategy, trade_size)

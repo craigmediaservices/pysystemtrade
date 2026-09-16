@@ -203,6 +203,13 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
     def apply_trade_limits_to_contract_order(
         self, proposed_order: contractOrder
     ) -> contractOrder:
+        if proposed_order.roll_order:
+            # Roll orders are generated from an existing position and are
+            # net-flat (spread) or bounded by it (outright legs); a limit
+            # sized for normal trading only blocks the roll. Limits remain
+            # the circuit-breaker for strategy orders.
+            return proposed_order
+
         data_trade_limits = dataTradeLimits(self.data)
 
         instrument_strategy = proposed_order.instrument_strategy

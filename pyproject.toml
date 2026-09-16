@@ -87,6 +87,8 @@ testpaths = [
     "sysquant/optimisation",
     "sysproduction/reporting/data/tests",
     "sysexecution/tests",
+    "sysbrokers/IB/tests",
+    "sysproduction/maintenance/tests",
     "sysquant/tests",
     # "systems",
     # "systems/accounts",
