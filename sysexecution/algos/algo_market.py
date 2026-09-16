@@ -10,6 +10,7 @@ from sysexecution.algos.common_functions import (
     post_trade_processing,
     MESSAGING_FREQUENCY,
     cancel_order,
+    cancel_order_reported_done_by_broker,
 )
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
 from sysexecution.orders.broker_orders import market_order_type, brokerOrderType
@@ -124,21 +125,8 @@ class algoMarket(Algo):
                 )
                 break
 
-            is_order_inactive = (
-                data_broker.check_order_is_inactive_given_control_object(
-                    broker_order_with_controls
-                )
-            )
-            if is_order_cancelled or is_order_inactive:
-                # see algo_original_best: a 'done' status is not proof the
-                # order is gone, so cancel explicitly before giving up
-                self.data.log.warning(
-                    "Order reported %s by broker, not by algo: cancelling "
-                    "explicitly before giving up"
-                    % ("Inactive" if is_order_inactive else "cancelled"),
-                    **log_attrs,
-                )
-                broker_order_with_controls = cancel_order(
+            if is_order_cancelled:
+                broker_order_with_controls = cancel_order_reported_done_by_broker(
                     self.data, broker_order_with_controls
                 )
                 break

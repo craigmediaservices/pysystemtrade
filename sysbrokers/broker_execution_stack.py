@@ -45,7 +45,7 @@ class brokerExecutionStackData(brokerOrderStackData):
     ) -> bool:
         raise NotImplementedError
 
-    def check_order_is_inactive_given_control_object(
+    def check_order_is_gone_from_broker_given_control_object(
         self, broker_order_with_controls: orderWithControls
     ) -> bool:
         raise NotImplementedError

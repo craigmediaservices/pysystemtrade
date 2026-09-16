@@ -16,6 +16,7 @@ from sysexecution.algos.common_functions import (
     cancel_order,
     check_current_limit_price_at_inside_spread,
     limit_price_is_at_inside_spread,
+    cancel_order_reported_done_by_broker,
 )
 from sysexecution.tick_data import tickerObject, analysisTick
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
@@ -51,17 +52,6 @@ IMBALANCE_ADJ_FACTOR = 3
 SIZE_LIMIT = 1
 
 no_need_to_switch = "_NO_NEED_TO_SWITCH"
-
-
-def order_must_be_cancelled_not_modified(order: Order) -> bool:
-    """
-    Calendar spread (combo) orders are cancelled and re-placed instead of
-    having their limit price modified in place.
-    """
-    try:
-        return bool(order.calendar_spread_order)
-    except (AttributeError, KeyError):
-        return False
 
 
 class algoOriginalBest(Algo):
@@ -193,21 +183,6 @@ class algoOriginalBest(Algo):
                     )
 
                     if need_to_switch:
-                        if order_must_be_cancelled_not_modified(order_control.order):
-                            # IB refuses in-place price changes on some combo
-                            # (calendar spread) orders and leaves the original
-                            # working, so we never modify a spread: cancel it
-                            # (confirmed) and let the stack handler re-place
-                            # the unfilled remainder at the current price.
-                            data.log.debug(
-                                "Spread order: would switch to aggressive because %s, "
-                                "cancelling to re-place rather than modifying"
-                                % reason_to_switch,
-                                **log_attrs,
-                            )
-                            order_control = cancel_order(data, order_control)
-                            break
-
                         data.log.debug(
                             "Switch to aggressive because %s" % reason_to_switch,
                             **log_attrs,
@@ -236,26 +211,10 @@ class algoOriginalBest(Algo):
                     order_control
                 )
             )
-            order_inactive = (
-                self.data_broker.check_order_is_inactive_given_control_object(
-                    order_control
+            if order_cancelled:
+                order_control = cancel_order_reported_done_by_broker(
+                    data, order_control
                 )
-            )
-            if order_cancelled or order_inactive:
-                # The broker (or our client library, on an error message)
-                # says this order is done, but that is not always true: IB
-                # reports Inactive for a working order whose modification
-                # was refused, and a rejected modify can leave the original
-                # order live. Never walk away from it: send an explicit
-                # cancel and wait for confirmation. Cancelling an order that
-                # really is gone is harmless.
-                data.log.warning(
-                    "Order reported %s by broker, not by algo: cancelling "
-                    "explicitly before giving up"
-                    % ("Inactive" if order_inactive else "cancelled"),
-                    **log_attrs,
-                )
-                order_control = cancel_order(data, order_control)
                 break
 
         return order_control

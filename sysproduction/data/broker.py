@@ -483,10 +483,10 @@ class dataBroker(productionDataLayerGeneric):
 
         return result
 
-    def check_order_is_inactive_given_control_object(
+    def check_order_is_gone_from_broker_given_control_object(
         self, broker_order_with_controls: orderWithControls
     ) -> bool:
-        result = self.broker_execution_stack_data.check_order_is_inactive_given_control_object(
+        result = self.broker_execution_stack_data.check_order_is_gone_from_broker_given_control_object(
             broker_order_with_controls
         )
 

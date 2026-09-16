@@ -1,21 +1,26 @@
 """
 Guards added after the 2026-09-16 MSCIASIA incident: a calendar-spread roll
-order was submitted three times because IB reported 'Inactive' after refusing
-a price modification, the algo treated Inactive as cancelled and walked away
-from a live order, the stack handler created another broker order, and the
-resulting over-fill killed the stack handler.
+order was submitted three times because IB refused a price modification,
+the local order status read as done, the algo walked away from a live
+order, the stack handler created another broker order, and the resulting
+over-fill killed the stack handler.
+
+Design: the local order status is only a TRIGGER ("broker says something
+happened"); whether an order is really gone is decided from the broker's
+open-order list.
 """
 import datetime
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
 from sysbrokers.IB.ib_orders import (
-    ib_status_means_cancelled,
-    ib_status_means_inactive,
-    ib_status_means_open,
+    ib_status_means_done_not_filled,
+    ib_status_means_filled,
+    open_order_keys_from_ib_trades,
+    keys_for_db_broker_order,
 )
-from sysexecution.algos.algo_original_best import order_must_be_cancelled_not_modified
 from sysexecution.orders.base_orders import overFilledOrder
 from sysexecution.orders.broker_orders import brokerOrder
 from sysexecution.orders.contract_orders import contractOrder
@@ -27,58 +32,74 @@ from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysexecution.trade_qty import tradeQuantity
 
 
-# --- broker status interpretation -------------------------------------------
+# --- broker status is a trigger only ----------------------------------------
 
 
-@pytest.mark.parametrize("status", ["Cancelled", "ApiCancelled"])
-def test_explicit_cancellations_are_cancelled(status):
-    assert ib_status_means_cancelled(status)
-    assert not ib_status_means_open(status)
+@pytest.mark.parametrize("status", ["Cancelled", "ApiCancelled", "Inactive"])
+def test_done_without_fill_triggers_explicit_cancel(status):
+    assert ib_status_means_done_not_filled(status)
 
 
 @pytest.mark.parametrize(
-    "status",
-    ["Inactive", "Submitted", "PreSubmitted", "PendingSubmit", "PendingCancel"],
+    "status", ["Submitted", "PreSubmitted", "PendingSubmit", "PendingCancel", "Filled"]
 )
-def test_working_or_inactive_orders_are_not_cancelled(status):
-    # Inactive is the important one: IB uses it for a working order whose
-    # modification was refused, and that order can still fill
-    assert not ib_status_means_cancelled(status)
-    assert ib_status_means_open(status)
+def test_working_or_filled_orders_do_not_trigger(status):
+    assert not ib_status_means_done_not_filled(status)
 
 
-def test_inactive_is_recognised_separately():
-    assert ib_status_means_inactive("Inactive")
-    assert not ib_status_means_inactive("Submitted")
-    assert not ib_status_means_inactive("Cancelled")
+def test_filled_is_recognised():
+    assert ib_status_means_filled("Filled")
+    assert not ib_status_means_filled("Inactive")
 
 
-def test_filled_is_neither_cancelled_nor_open():
-    assert not ib_status_means_cancelled("Filled")
-    assert not ib_status_means_open("Filled")
+# --- identity keys against the broker's open-order list ---------------------
 
 
-# --- spread orders are cancelled and re-placed, never modified ---------------
+def _ib_trade(perm_id, client_id, order_id):
+    order = SimpleNamespace(permId=perm_id, clientId=client_id, orderId=order_id)
+    return SimpleNamespace(order=order)
 
 
-def _broker_order(contract_id, trade):
-    return brokerOrder("strategy", "INSTR", contract_id, trade)
+def test_open_order_keys_use_both_permanent_and_temporary_ids():
+    keys = open_order_keys_from_ib_trades(
+        [_ib_trade(1246379236, 138, 373298), _ib_trade(0, 138, 373410)]
+    )
+    assert ("perm", 1246379236) in keys
+    assert ("temp", 138, 373298) in keys
+    # no permanent id yet: only the temporary key
+    assert ("perm", 0) not in keys
+    assert ("temp", 138, 373410) in keys
 
 
-def test_calendar_spread_orders_are_cancelled_not_modified():
-    spread = _broker_order(["20260900", "20261200"], [-1, 1])
-    assert spread.calendar_spread_order
-    assert order_must_be_cancelled_not_modified(spread)
+def _db_broker_order(tempid, permid):
+    order = brokerOrder(
+        "strategy",
+        "INSTR",
+        ["20260900", "20261200"],
+        [-1, 1],
+        broker_tempid=tempid,
+        broker_permid=permid,
+    )
+    return order
 
 
-def test_outright_orders_can_still_be_modified():
-    outright = _broker_order("20261200", 1)
-    assert not outright.calendar_spread_order
-    assert not order_must_be_cancelled_not_modified(outright)
+def test_db_order_keys_parse_tempid_and_permid():
+    keys = keys_for_db_broker_order(_db_broker_order("U123/138/373298", 1246379236))
+    assert keys == {("perm", 1246379236), ("temp", 138, 373298)}
 
 
-def test_objects_without_the_flag_default_to_modify():
-    assert not order_must_be_cancelled_not_modified(object())
+def test_db_order_keys_survive_missing_permid_and_odd_tempid():
+    assert keys_for_db_broker_order(_db_broker_order("U123/138/373298", "")) == {
+        ("temp", 138, 373298)
+    }
+    assert keys_for_db_broker_order(_db_broker_order("", 0)) == set()
+    assert keys_for_db_broker_order(_db_broker_order("garbage", None)) == set()
+
+
+def test_same_order_matches_across_the_two_views():
+    ib_keys = open_order_keys_from_ib_trades([_ib_trade(1246379236, 138, 373298)])
+    db_keys = keys_for_db_broker_order(_db_broker_order("U123/138/373298", 0))
+    assert db_keys & ib_keys
 
 
 # --- no second broker order while the first is still working ----------------
@@ -110,14 +131,15 @@ def _handler_with(broker_orders, open_ids):
     return handler
 
 
-def _contract_order_with_children(children):
+def _contract_order_with_children(children, order_id=7084):
     order = contractOrder("strategy", "INSTR", ["20260900", "20261200"], [-1, 1])
     order._children = list(children)
+    order._order_id = order_id
     return order
 
 
 def _child(order_id, fill):
-    child = _broker_order(["20260900", "20261200"], [-1, 1])
+    child = brokerOrder("strategy", "INSTR", ["20260900", "20261200"], [-1, 1])
     child._order_id = order_id
     child._fill = tradeQuantity(fill)
     return child
@@ -129,15 +151,17 @@ def test_no_children_means_nothing_open():
     assert not handler.contract_order_has_unfilled_child_still_open_at_broker(order)
 
 
-def test_unfilled_child_still_open_blocks_new_broker_order():
+def test_unfilled_child_still_open_blocks_and_warns_once():
     children = {7719: _child(7719, [0, 0])}
     handler = _handler_with(children, open_ids={7719})
     order = _contract_order_with_children([7719])
     assert handler.contract_order_has_unfilled_child_still_open_at_broker(order)
+    assert handler.contract_order_has_unfilled_child_still_open_at_broker(order)
     handler._log.warning.assert_called_once()
+    handler._log.debug.assert_called_once()
 
 
-def test_unfilled_child_that_is_gone_at_broker_does_not_block():
+def test_unfilled_child_gone_from_broker_does_not_block():
     children = {7719: _child(7719, [0, 0])}
     handler = _handler_with(children, open_ids=set())
     order = _contract_order_with_children([7719])
@@ -159,7 +183,7 @@ def test_missing_children_are_skipped():
     assert not handler.contract_order_has_unfilled_child_still_open_at_broker(order)
 
 
-# --- an over-fill locks the instrument instead of killing the process --------
+# --- an over-fill locks the instrument, stops the order, does not raise -----
 
 
 def _fills_handler(raising_exc):
@@ -171,48 +195,43 @@ def _fills_handler(raising_exc):
     return handler
 
 
-def test_overfill_locks_instrument_and_does_not_raise():
+def _apply(handler, order, qty):
+    handler.apply_fills_to_contract_order(
+        contract_order_before_fill=order,
+        filled_qty=tradeQuantity(qty),
+        filled_price=-10.8,
+        fill_datetime=datetime.datetime.now(),
+    )
+
+
+def test_overfill_locks_stops_order_and_logs_critical_once():
     handler = _fills_handler(overFilledOrder("fill [-2, 2] > trade [-1, 1]"))
     order = _contract_order_with_children([7719])
-    order._order_id = 7084
-    with mock.patch("sysexecution.stack_handler.fills.dataLocks") as data_locks_class:
-        data_locks = data_locks_class.return_value
-        data_locks.is_instrument_locked.return_value = False
-        handler.apply_fills_to_contract_order(
-            contract_order_before_fill=order,
-            filled_qty=tradeQuantity([-2, 2]),
-            filled_price=-10.8,
-            fill_datetime=datetime.datetime.now(),
-        )
-        data_locks.add_lock_for_instrument.assert_called_once_with("INSTR")
+    with mock.patch("sysexecution.stack_handler.fills.dataLocks") as locks_class:
+        locks = locks_class.return_value
+        locks.is_instrument_locked.return_value = False
+        _apply(handler, order, [-2, 2])
+        # the next pass sees the same over-fill again: no second critical,
+        # no re-lock even if the operator has since cleared the lock
+        _apply(handler, order, [-3, 3])
+        locks.add_lock_for_instrument.assert_called_once_with("INSTR")
+    handler._contract_stack.stop_further_trading_of_order.assert_called_once_with(7084)
     handler._log.critical.assert_called_once()
 
 
-def test_overfill_on_already_locked_instrument_is_quiet():
+def test_overfill_on_already_locked_instrument_does_not_relock():
     handler = _fills_handler(overFilledOrder("again"))
     order = _contract_order_with_children([7719])
-    order._order_id = 7084
-    with mock.patch("sysexecution.stack_handler.fills.dataLocks") as data_locks_class:
-        data_locks = data_locks_class.return_value
-        data_locks.is_instrument_locked.return_value = True
-        handler.apply_fills_to_contract_order(
-            contract_order_before_fill=order,
-            filled_qty=tradeQuantity([-2, 2]),
-            filled_price=-10.8,
-            fill_datetime=datetime.datetime.now(),
-        )
-        data_locks.add_lock_for_instrument.assert_not_called()
-    handler._log.critical.assert_not_called()
+    with mock.patch("sysexecution.stack_handler.fills.dataLocks") as locks_class:
+        locks = locks_class.return_value
+        locks.is_instrument_locked.return_value = True
+        _apply(handler, order, [-2, 2])
+        locks.add_lock_for_instrument.assert_not_called()
+    handler._log.critical.assert_called_once()
 
 
 def test_other_fill_errors_still_propagate():
     handler = _fills_handler(ValueError("something else"))
     order = _contract_order_with_children([7719])
-    order._order_id = 7084
     with pytest.raises(ValueError):
-        handler.apply_fills_to_contract_order(
-            contract_order_before_fill=order,
-            filled_qty=tradeQuantity([-1, 1]),
-            filled_price=-10.8,
-            fill_datetime=datetime.datetime.now(),
-        )
+        _apply(handler, order, [-1, 1])

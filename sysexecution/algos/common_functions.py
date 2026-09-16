@@ -11,6 +11,9 @@ MESSAGING_FREQUENCY = 30
 # how long to cancel an order
 CANCEL_WAIT_TIME = 60
 
+# how often to ask the broker whether the cancel went through
+CANCEL_POLL_SECONDS = 0.25
+
 
 def post_trade_processing(
     data: dataBlob, broker_order_with_controls: orderWithControls
@@ -38,11 +41,15 @@ def cancel_order(
 
     # Wait for cancel. It's vital we do this since if a fill comes in before we finish it will screw
     #   everything up...
+    # Confirmation comes from the broker's open-order list, not from the local
+    # order status: ib_async can mark an order 'Cancelled' locally on an error
+    # message while the exchange still works it, and a rejected order sits at
+    # 'Inactive' forever (it is simply never in the open list).
     timer = quickTimer(seconds=CANCEL_WAIT_TIME)
     not_cancelled = True
     while not_cancelled:
-        time.sleep(0.001)
-        is_cancelled = data_broker.check_order_is_cancelled_given_control_object(
+        time.sleep(CANCEL_POLL_SECONDS)
+        is_cancelled = data_broker.check_order_is_gone_from_broker_given_control_object(
             broker_order_with_controls
         )
         if is_cancelled:
@@ -83,3 +90,24 @@ def check_current_limit_price_at_inside_spread(
     new_limit_price = current_side_price
 
     return new_limit_price
+
+
+def cancel_order_reported_done_by_broker(
+    data: dataBlob, broker_order_with_controls: orderWithControls
+) -> orderWithControls:
+    """
+    The broker (or our client library, on an error message) says this order
+    is done without a fill. That is not proof it is gone: IB reports Inactive
+    for a working order whose modification was refused, and ib_async writes
+    Cancelled locally on any non-warning error. Never walk away from such an
+    order: cancel explicitly and wait for the broker's open-order list to
+    confirm. Cancelling an order that really is gone is harmless.
+    """
+    log_attrs = {**broker_order_with_controls.order.log_attributes(), "method": "temp"}
+    data.log.warning(
+        "Order reported done by broker, not by algo: cancelling explicitly "
+        "before giving up",
+        **log_attrs,
+    )
+
+    return cancel_order(data, broker_order_with_controls)
