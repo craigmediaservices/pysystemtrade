@@ -124,22 +124,18 @@ class algoMarket(Algo):
                 )
                 break
 
-            if is_order_cancelled:
-                self.data.log.warning(
-                    "Order has been cancelled apparently by broker: not by algo!",
-                    **log_attrs,
-                )
-                break
-
             is_order_inactive = (
                 data_broker.check_order_is_inactive_given_control_object(
                     broker_order_with_controls
                 )
             )
-            if is_order_inactive:
+            if is_order_cancelled or is_order_inactive:
+                # see algo_original_best: a 'done' status is not proof the
+                # order is gone, so cancel explicitly before giving up
                 self.data.log.warning(
-                    "Order reported Inactive by broker: cancelling explicitly "
-                    "before giving up",
+                    "Order reported %s by broker, not by algo: cancelling "
+                    "explicitly before giving up"
+                    % ("Inactive" if is_order_inactive else "cancelled"),
                     **log_attrs,
                 )
                 broker_order_with_controls = cancel_order(

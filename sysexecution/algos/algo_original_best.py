@@ -236,22 +236,23 @@ class algoOriginalBest(Algo):
                     order_control
                 )
             )
-            if order_cancelled:
-                data.log.warning("Order has been cancelled: not by algo", **log_attrs)
-                break
-
             order_inactive = (
                 self.data_broker.check_order_is_inactive_given_control_object(
                     order_control
                 )
             )
-            if order_inactive:
-                # Either rejected outright, or a modification was refused and
-                # the original order is still working. Never walk away from
-                # it: cancel explicitly and wait for confirmation.
+            if order_cancelled or order_inactive:
+                # The broker (or our client library, on an error message)
+                # says this order is done, but that is not always true: IB
+                # reports Inactive for a working order whose modification
+                # was refused, and a rejected modify can leave the original
+                # order live. Never walk away from it: send an explicit
+                # cancel and wait for confirmation. Cancelling an order that
+                # really is gone is harmless.
                 data.log.warning(
-                    "Order reported Inactive by broker: cancelling explicitly "
-                    "before giving up",
+                    "Order reported %s by broker, not by algo: cancelling "
+                    "explicitly before giving up"
+                    % ("Inactive" if order_inactive else "cancelled"),
                     **log_attrs,
                 )
                 order_control = cancel_order(data, order_control)
