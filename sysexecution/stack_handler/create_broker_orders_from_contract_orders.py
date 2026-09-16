@@ -98,6 +98,14 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
             ## Do no further checks or resizing whatsoever!
             return original_contract_order
 
+        if self.contract_order_has_unfilled_child_still_open_at_broker(
+            original_contract_order
+        ):
+            # an earlier broker order for this contract order is still working
+            # at the broker (e.g. an algo gave up on it): placing another one
+            # would double up the trade
+            return missing_order
+
         # CHECK FOR LOCKS
         data_locks = dataLocks(self.data)
         instrument_locked = data_locks.is_instrument_locked(
@@ -119,6 +127,47 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
         contract_order_to_trade = self.size_contract_order(original_contract_order)
 
         return contract_order_to_trade
+
+    def contract_order_has_unfilled_child_still_open_at_broker(
+        self, contract_order: contractOrder
+    ) -> bool:
+        if contract_order.no_children():
+            return False
+
+        broker_orders = self.broker_stack.get_list_of_orders_from_order_id_list(
+            contract_order.children
+        )
+        for broker_order in broker_orders:
+            if broker_order is missing_order:
+                continue
+            if broker_order.fill_equals_desired_trade():
+                continue
+            if self.data_broker.check_order_is_still_open_at_broker(broker_order):
+                self._log_open_child_block_once(contract_order, broker_order)
+                return True
+
+        return False
+
+    def _log_open_child_block_once(
+        self, contract_order: contractOrder, broker_order: brokerOrder
+    ):
+        already_warned = getattr(self, "_warned_open_child_blocks", set())
+        key = (contract_order.order_id, broker_order.order_id)
+        msg = (
+            "Broker order %s is still open at the broker: not creating "
+            "another broker order for %s"
+            % (
+                str(broker_order),
+                str(contract_order),
+            )
+        )
+        log_attrs = {**contract_order.log_attributes(), "method": "temp"}
+        if key in already_warned:
+            self.log.debug(msg, **log_attrs)
+        else:
+            self.log.warning(msg, **log_attrs)
+            already_warned.add(key)
+            self._warned_open_child_blocks = already_warned
 
     def size_contract_order(
         self, original_contract_order: contractOrder

@@ -1,3 +1,5 @@
+import datetime
+
 from ib_async import Trade as ibTrade, OrderStatus as ibOrderStatus
 
 from sysbrokers.IB.ib_futures_contracts_data import ibFuturesContractData
@@ -25,6 +27,71 @@ from sysexecution.orders.broker_orders import brokerOrder
 from sysexecution.tick_data import tickerObject
 
 from syslogging.logger import *
+
+
+OPEN_ORDER_CACHE_SECONDS = 1.0
+
+
+def ib_status_means_done_not_filled(status: str) -> bool:
+    """
+    The broker (or ib_async on an error message) reports the order as done
+    without a fill. This is a TRIGGER, not proof the order is gone: IB reports
+    'Inactive' for a working order whose modification was refused, and
+    ib_async writes 'Cancelled' locally on any non-warning error for an
+    order (e.g. 201 'Duplicate ID' after a refused combo modify) while the
+    exchange may still be working it. Seen 2026-09-16 on a Eurex calendar
+    spread that later filled three times. Whoever sees this must cancel
+    explicitly and confirm against the broker's open-order list.
+    """
+    return status in ibOrderStatus.DoneStates and status != ibOrderStatus.Filled
+
+
+def ib_status_means_filled(status: str) -> bool:
+    return status == ibOrderStatus.Filled
+
+
+def open_order_keys_from_ib_trades(list_of_ib_trades: list) -> set:
+    """
+    Identity keys for the orders IB says are open, matched two ways:
+    permanent id, and (client id, order id). Pure function, unit-tested.
+    """
+    keys = set()
+    for trade in list_of_ib_trades:
+        order = trade.order
+        perm_id = int(getattr(order, "permId", 0) or 0)
+        if perm_id:
+            keys.add(("perm", perm_id))
+        keys.add(("temp", int(order.clientId), int(order.orderId)))
+
+    return keys
+
+
+def keys_for_db_broker_order(broker_order: brokerOrder) -> set:
+    """
+    The same identity keys for a broker order as stored in our database.
+    broker_tempid is 'account/clientid/orderid'; broker_permid may be unset.
+    """
+    keys = set()
+    try:
+        perm_id = int(broker_order.broker_permid or 0)
+    except (TypeError, ValueError):
+        perm_id = 0
+    if perm_id:
+        keys.add(("perm", perm_id))
+
+    tempid = str(broker_order.broker_tempid or "")
+    parts = tempid.split("/")
+    if len(parts) == 3:
+        try:
+            keys.add(("temp", int(parts[1]), int(parts[2])))
+        except ValueError:
+            pass
+
+    return keys
+
+
+def keys_for_ib_trade(ib_trade: ibTrade) -> set:
+    return open_order_keys_from_ib_trades([ib_trade])
 
 
 class ibOrderWithControls(orderWithControls):
@@ -423,26 +490,86 @@ class ibExecutionStackData(brokerExecutionStackData):
         return success
 
     def check_order_is_cancelled(self, broker_order: brokerOrder) -> bool:
+        """
+        Used by end-of-day cancel-and-confirm: has this database broker order
+        gone from the broker's open-order list (cancelled, rejected or filled)?
+        """
         matched_control_order = (
             self.match_db_broker_order_to_control_order_from_brokers(broker_order)
         )
         if matched_control_order is missing_order:
             raise missingOrder
-        cancellation_status = self.check_order_is_cancelled_given_control_object(
+
+        return self.check_order_is_gone_from_broker_given_control_object(
             matched_control_order
         )
-
-        return cancellation_status
 
     def check_order_is_cancelled_given_control_object(
         self, broker_order_with_controls: ibOrderWithControls
     ) -> bool:
+        """
+        Broker reports done-but-not-filled. A trigger only: see
+        ib_status_means_done_not_filled. Confirm with
+        check_order_is_gone_from_broker_given_control_object.
+        """
         status = self.get_status_for_control_object(broker_order_with_controls)
-        cancellation_status = (
-            status in ibOrderStatus.DoneStates and status != ibOrderStatus.Filled
-        )
 
-        return cancellation_status
+        return ib_status_means_done_not_filled(status)
+
+    def check_order_is_gone_from_broker_given_control_object(
+        self, broker_order_with_controls: ibOrderWithControls
+    ) -> bool:
+        """
+        Authoritative: filled, or no longer in the broker's open-order list.
+        A rejected order is never in that list; a working order whose
+        modification was refused always is.
+        """
+        status = self.get_status_for_control_object(broker_order_with_controls)
+        if ib_status_means_filled(status):
+            return True
+
+        ib_trade = broker_order_with_controls.control_object.trade
+        keys = keys_for_ib_trade(ib_trade)
+
+        return not self._any_key_open_at_broker(keys)
+
+    def check_order_is_still_open_at_broker(self, broker_order: brokerOrder) -> bool:
+        """
+        Is this (database) broker order in the broker's open-order list?
+
+        Used before creating another broker order for the same contract order:
+        if an earlier child is still working at the broker, placing another one
+        would double up the trade.
+        """
+        keys = keys_for_db_broker_order(broker_order)
+
+        return self._any_key_open_at_broker(keys)
+
+    def _any_key_open_at_broker(self, keys: set) -> bool:
+        if len(keys) == 0:
+            return False
+        open_keys = self.get_open_order_keys_from_broker()
+
+        return len(keys.intersection(open_keys)) > 0
+
+    def get_open_order_keys_from_broker(self) -> set:
+        """
+        Fresh reqAllOpenOrders (all clients), cached for OPEN_ORDER_CACHE_SECONDS
+        because the stack handler asks several times per pass.
+        """
+        now = datetime.datetime.now()
+        cached = getattr(self, "_open_order_keys_cache", None)
+        if cached is not None:
+            cache_time, keys = cached
+            age = (now - cache_time).total_seconds()
+            if age < OPEN_ORDER_CACHE_SECONDS:
+                return keys
+
+        list_of_ib_trades = self.ib_client.ib.reqAllOpenOrders()
+        keys = open_order_keys_from_ib_trades(list_of_ib_trades)
+        self._open_order_keys_cache = (now, keys)
+
+        return keys
 
     def _get_status_for_trade_object(self, original_trade_object: ibTrade) -> str:
         self.ib_client.refresh()

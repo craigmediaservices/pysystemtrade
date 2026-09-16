@@ -16,6 +16,7 @@ from sysexecution.algos.common_functions import (
     cancel_order,
     check_current_limit_price_at_inside_spread,
     limit_price_is_at_inside_spread,
+    cancel_order_reported_done_by_broker,
 )
 from sysexecution.tick_data import tickerObject, analysisTick
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
@@ -211,7 +212,9 @@ class algoOriginalBest(Algo):
                 )
             )
             if order_cancelled:
-                data.log.warning("Order has been cancelled: not by algo", **log_attrs)
+                order_control = cancel_order_reported_done_by_broker(
+                    data, order_control
+                )
                 break
 
         return order_control

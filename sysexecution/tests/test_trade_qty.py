@@ -1,3 +1,16 @@
+"""
+Doctests for the trade-quantity resizing helpers. The imports below are what
+the doctests call; pytest collects docstrings from this module (see
+pyproject.toml [tool.pytest.ini_options] --doctest-modules).
+"""
+from sysexecution.trade_qty import (  # noqa: F401 - used by the doctests
+    tradeQuantity,
+    change_trade_size_proportionally_to_meet_abs_qty_limit,
+    reduce_trade_size_proportionally_so_smallest_leg_is_max_size,
+    reduce_trade_size_proportionally_to_abs_limit_per_leg,
+)
+
+
 def _doc_tests1():
     """
 

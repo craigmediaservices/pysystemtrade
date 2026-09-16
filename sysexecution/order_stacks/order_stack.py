@@ -338,6 +338,31 @@ class orderStackData(object):
             **log_attrs,
         )
 
+    def stop_further_trading_of_order(self, order_id: int):
+        """
+        Set the order's required trade equal to whatever has been filled so
+        far, so nothing more is ever traded for it (the completion sweep
+        then archives it). Used after an over-fill, when we no longer trust
+        the relationship between this order and what the broker did.
+        """
+        existing_order = self.get_order_with_id_from_stack(order_id)
+        if existing_order is missing_order:
+            error_msg = "Can't stop trading of non existent order %d" % order_id
+            self.log.warning(error_msg)
+            raise missingOrder(error_msg)
+
+        new_order = copy(existing_order)
+        new_order.change_trade_qty_to_filled_qty()
+
+        self._change_order_on_stack(order_id, new_order)
+
+        self.log.debug(
+            "Order %s: trade set to filled qty %s, no further trading"
+            % (str(existing_order), str(new_order.fill)),
+            **existing_order.log_attributes(),
+            method="temp",
+        )
+
     def zero_out(self, order_id: int):
         # zero out an order, i.e. remove its trades and fills and deactivate it
 

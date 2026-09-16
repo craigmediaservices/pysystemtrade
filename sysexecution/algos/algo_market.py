@@ -10,6 +10,7 @@ from sysexecution.algos.common_functions import (
     post_trade_processing,
     MESSAGING_FREQUENCY,
     cancel_order,
+    cancel_order_reported_done_by_broker,
 )
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
 from sysexecution.orders.broker_orders import market_order_type, brokerOrderType
@@ -125,9 +126,8 @@ class algoMarket(Algo):
                 break
 
             if is_order_cancelled:
-                self.data.log.warning(
-                    "Order has been cancelled apparently by broker: not by algo!",
-                    **log_attrs,
+                broker_order_with_controls = cancel_order_reported_done_by_broker(
+                    self.data, broker_order_with_controls
                 )
                 break
 
