@@ -1,7 +1,9 @@
 """
 Equivalent of interactive_controls -> 4 (process control) -> 44 (mark all
-dead processes as close), followed by restarting any daytime process that
-should be running now but is not.
+dead processes as close), followed by restarting the daytime processes that
+CRASHED (dead pid while still marked running) or were killed as hung, if
+they should be running now. Processes that finished their day normally are
+left alone.
 
     python3 sysproduction/maintenance/restart_crashed_processes.py            # do it
     python3 sysproduction/maintenance/restart_crashed_processes.py --dry-run  # show only
@@ -152,7 +154,11 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
                         "no restart" % (name, c.process_id)
                     )
 
-        # step 1: interactive_controls 4/44
+        # step 1: interactive_controls 4/44. A process is CRASHED if it is
+        # still marked running but its pid is gone (a process that finished
+        # its day normally has last_end_time >= last_start_time and must NOT
+        # be restarted: on 2026-09-16 this tool re-ran run_systems and the
+        # order generator in the evening because "not alive inside window").
         procs = control.get_dict_of_control_processes()
         dead = [
             n
@@ -167,7 +173,8 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
             control.check_if_pid_running_and_if_not_finish_all_processes()
             print("   marked as close")
 
-        # step 2: restart what should be running now
+        # step 2: restart ONLY crashed (or hung-and-killed) daytime processes
+        # that should be running now
         procs = control.get_dict_of_control_processes()
         for name in DAYTIME_PROCESSES:
             c = procs.get(name)
@@ -175,8 +182,11 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
                 continue
             if pid_alive(c.process_id):
                 continue
+            if name not in dead:
+                # finished normally (or never started today): not ours to restart
+                continue
             if not should_be_running(control, name, now):
-                print("   %s not running but outside its window - leave" % name)
+                print("   %s crashed but outside its window - leave" % name)
                 continue
             allowed, why = restart_allowed(history.get(name, []), now)
             if not allowed:
