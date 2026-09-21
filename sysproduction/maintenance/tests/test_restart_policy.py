@@ -128,3 +128,65 @@ def test_kill_refuses_a_pid_that_is_not_the_script():
     ) as kill:
         assert not rcp.kill_process(12345, "run_stack_handler")
         kill.assert_not_called()
+
+
+# --- crash detection (2026-09-21) ---------------------------------------------
+# The 5-minute monitor usually closes a dead process before this tool runs,
+# leaving recently_crashed=True and pid 0; that must still count as a crash.
+
+
+def _control(
+    status="GO",
+    pid=0,
+    started=None,
+    ended=None,
+    crashed=False,
+):
+    return SimpleNamespace(
+        status=status,
+        process_id=pid,
+        last_start_time=started or NOW - datetime.timedelta(hours=9),
+        last_end_time=ended or NOW - datetime.timedelta(hours=7),
+        recently_crashed=crashed,
+    )
+
+
+def _dead_pid():
+    return mock.patch.object(rcp, "pid_alive", return_value=False)
+
+
+def test_dead_pid_still_marked_running_is_crashed():
+    rec = _control(pid=4242, started=_minutes_ago(60), ended=_minutes_ago(600))
+    with _dead_pid():
+        assert rcp.looks_crashed(rec, NOW)
+
+
+def test_closed_by_the_monitor_today_is_crashed():
+    rec = _control(
+        pid=0, started=_minutes_ago(500), ended=_minutes_ago(60), crashed=True
+    )
+    assert rcp.looks_crashed(rec, NOW)
+
+
+def test_finished_normally_is_not_crashed():
+    rec = _control(pid=0, started=_minutes_ago(500), ended=_minutes_ago(60))
+    assert not rcp.looks_crashed(rec, NOW)
+
+
+def test_stale_crash_flag_from_yesterday_does_not_count():
+    yesterday = NOW - datetime.timedelta(days=1)
+    rec = _control(pid=0, started=yesterday, ended=yesterday, crashed=True)
+    assert not rcp.looks_crashed(rec, NOW)
+
+
+def test_alive_process_is_not_crashed():
+    rec = _control(
+        pid=4242, started=_minutes_ago(60), ended=_minutes_ago(600), crashed=True
+    )
+    with mock.patch.object(rcp, "pid_alive", return_value=True):
+        assert not rcp.looks_crashed(rec, NOW)
+
+
+def test_stopped_or_paused_process_is_never_crashed():
+    rec = _control(status="STOP", pid=0, started=_minutes_ago(60), crashed=True)
+    assert not rcp.looks_crashed(rec, NOW)

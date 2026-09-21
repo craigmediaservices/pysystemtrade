@@ -71,6 +71,39 @@ class ibClient(object):
     def get_instrument_code_from_broker_contract_object(
         self, broker_contract_object: ibContract
     ) -> str:
+        # A conId names one specific contract for ever, so the answer never
+        # changes and is cached for the life of the process. Without this the
+        # position-break check (every stack handler pass) cost one blocking
+        # reqContractDetails per open position, ~100 requests a pass, which
+        # is what tripped the request timeout on 2026-09-18 and 2026-09-21.
+        con_id = getattr(broker_contract_object, "conId", 0)
+        if not con_id:
+            return self._get_instrument_code_from_broker_contract_object_uncached(
+                broker_contract_object
+            )
+
+        cache = self._instrument_code_for_con_id
+        instrument_code = cache.get(con_id)
+        if instrument_code is None:
+            instrument_code = (
+                self._get_instrument_code_from_broker_contract_object_uncached(
+                    broker_contract_object
+                )
+            )
+            cache[con_id] = instrument_code
+
+        return instrument_code
+
+    @property
+    def _instrument_code_for_con_id(self) -> dict:
+        cache = getattr(self, "_instrument_code_for_con_id_store", None)
+        if cache is None:
+            cache = self._instrument_code_for_con_id_store = {}
+        return cache
+
+    def _get_instrument_code_from_broker_contract_object_uncached(
+        self, broker_contract_object: ibContract
+    ) -> str:
         broker_identity = self.broker_identity_for_contract(broker_contract_object)
         instrument_code = self.get_instrument_code_from_broker_identity_for_contract(
             broker_identity

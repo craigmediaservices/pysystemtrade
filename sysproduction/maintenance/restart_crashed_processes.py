@@ -1,9 +1,16 @@
 """
 Equivalent of interactive_controls -> 4 (process control) -> 44 (mark all
 dead processes as close), followed by restarting the daytime processes that
-CRASHED (dead pid while still marked running) or were killed as hung, if
-they should be running now. Processes that finished their day normally are
-left alone.
+CRASHED or were killed as hung, if they should be running now. Processes
+that finished their day normally are left alone.
+
+A process counts as crashed if its pid is gone while it is still marked
+running, OR if syscontrol/monitor.py (every 5 min) already marked it closed
+for that reason: the control record then carries recently_crashed=True
+until the next start. Until 2026-09-21 only the first test existed, so the
+monitor usually won the race and a crashed run_stack_handler was taken for
+"finished normally" and left down all day (2026-09-18 10:34, 2026-09-21
+02:28).
 
     python3 sysproduction/maintenance/restart_crashed_processes.py            # do it
     python3 sysproduction/maintenance/restart_crashed_processes.py --dry-run  # show only
@@ -83,6 +90,27 @@ def restart_allowed(stamps: list, now: datetime.datetime) -> tuple:
     return True, ""
 
 
+def looks_crashed(record, now: datetime.datetime) -> bool:
+    """
+    Pure, unit-tested. record = a controlProcess from the control table.
+
+    Crashed = pid gone while still marked running (we close it ourselves),
+    or already closed by the monitor for that reason (recently_crashed is
+    set on that path only and cleared by the next start). The second test
+    is limited to a start today so a stale flag from yesterday cannot start
+    a process ahead of its own cron line.
+    """
+    if record.status != "GO":
+        return False
+    if record.process_id and pid_alive(record.process_id):
+        return False
+    if record.process_id and record.last_start_time > record.last_end_time:
+        return True
+    if record.recently_crashed and record.last_start_time.date() == now.date():
+        return True
+    return False
+
+
 def kill_process(pid, script_name: str) -> bool:
     """SIGKILL, but only a pid whose command line is the expected script."""
     if not pid_runs_script(pid, script_name):
@@ -154,24 +182,18 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
                         "no restart" % (name, c.process_id)
                     )
 
-        # step 1: interactive_controls 4/44. A process is CRASHED if it is
-        # still marked running but its pid is gone (a process that finished
-        # its day normally has last_end_time >= last_start_time and must NOT
-        # be restarted: on 2026-09-16 this tool re-ran run_systems and the
-        # order generator in the evening because "not alive inside window").
+        # step 1: interactive_controls 4/44. A process that finished its day
+        # normally has last_end_time >= last_start_time and no crash flag,
+        # and must NOT be restarted: on 2026-09-16 this tool re-ran
+        # run_systems and the order generator in the evening because "not
+        # alive inside window". See looks_crashed for what does count.
         procs = control.get_dict_of_control_processes()
-        dead = [
-            n
-            for n, c in procs.items()
-            if c.status == "GO"
-            and c.process_id
-            and not pid_alive(c.process_id)
-            and c.last_start_time > c.last_end_time
-        ]
-        print("processes with a dead PID still marked running:", dead or "none")
-        if dead and not dry_run:
+        dead = [n for n, c in procs.items() if looks_crashed(c, now)]
+        still_marked_running = [n for n in dead if procs[n].process_id]
+        print("crashed processes:", dead or "none")
+        if still_marked_running and not dry_run:
             control.check_if_pid_running_and_if_not_finish_all_processes()
-            print("   marked as close")
+            print("   marked as close:", still_marked_running)
 
         # step 2: restart ONLY crashed (or hung-and-killed) daytime processes
         # that should be running now
