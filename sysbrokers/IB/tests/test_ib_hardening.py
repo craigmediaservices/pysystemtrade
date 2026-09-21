@@ -146,3 +146,96 @@ def test_combo_without_resolved_legs_falls_back_to_itself():
         contract_for_instrument_lookup(SimpleNamespace(ibcontract=bag, legs=None))
         is bag
     )
+
+
+# --- instrument code per conId is looked up once (2026-09-21) ---------------------
+
+
+def _instrument_client(codes):
+    from sysbrokers.IB.client.ib_client import ibClient
+
+    client = object.__new__(ibClient)
+    client._get_instrument_code_from_broker_contract_object_uncached = mock.MagicMock(
+        side_effect=codes
+    )
+    return client
+
+
+def test_instrument_code_is_fetched_once_per_con_id():
+    client = _instrument_client(["V2X"])
+    contract = SimpleNamespace(conId=555, symbol="V2TX")
+    for _ in range(107):
+        assert client.get_instrument_code_from_broker_contract_object(contract) == "V2X"
+    assert (
+        client._get_instrument_code_from_broker_contract_object_uncached.call_count == 1
+    )
+
+
+def test_instrument_code_cache_is_per_con_id():
+    client = _instrument_client(["V2X", "FESB"])
+    assert (
+        client.get_instrument_code_from_broker_contract_object(SimpleNamespace(conId=1))
+        == "V2X"
+    )
+    assert (
+        client.get_instrument_code_from_broker_contract_object(SimpleNamespace(conId=2))
+        == "FESB"
+    )
+
+
+def test_contract_without_con_id_is_never_cached():
+    client = _instrument_client(["A", "B"])
+    pattern = SimpleNamespace(conId=0)
+    assert client.get_instrument_code_from_broker_contract_object(pattern) == "A"
+    assert client.get_instrument_code_from_broker_contract_object(pattern) == "B"
+
+
+def test_failed_lookup_is_not_cached():
+    client = _instrument_client([missingContract(), "V2X"])
+    contract = SimpleNamespace(conId=9)
+    with pytest.raises(missingContract):
+        client.get_instrument_code_from_broker_contract_object(contract)
+    assert client.get_instrument_code_from_broker_contract_object(contract) == "V2X"
+
+
+# --- position-break check survives a timeout ------------------------------------
+
+
+def _checks(side_effect):
+    from sysexecution.stack_handler.checks import stackHandlerChecks
+    from sysexecution.stack_handler import checks as checks_module
+
+    handler = object.__new__(stackHandlerChecks)
+    handler._log = mock.MagicMock()
+    handler._data = SimpleNamespace()
+    handler.log_and_lock_new_breaks = mock.MagicMock()
+    handler.clear_position_locks_where_breaks_fixed = mock.MagicMock()
+    broker = mock.MagicMock()
+    broker.get_list_of_breaks_between_broker_and_db_contract_positions.side_effect = (
+        side_effect
+    )
+    patch = mock.patch.object(checks_module, "dataBroker", return_value=broker)
+    return handler, patch
+
+
+def test_position_break_check_skips_the_pass_on_timeout():
+    handler, patch = _checks(asyncio.TimeoutError())
+    with patch:
+        handler.check_external_position_break()
+    handler.log_and_lock_new_breaks.assert_not_called()
+    handler.clear_position_locks_where_breaks_fixed.assert_not_called()
+    handler.log.warning.assert_called_once()
+
+
+def test_position_break_check_still_locks_when_ib_answers():
+    handler, patch = _checks([["BREAK"]])
+    with patch:
+        handler.check_external_position_break()
+    handler.log_and_lock_new_breaks.assert_called_once_with(["BREAK"])
+    handler.clear_position_locks_where_breaks_fixed.assert_called_once_with(["BREAK"])
+
+
+def test_position_break_check_does_not_swallow_other_errors():
+    handler, patch = _checks(ValueError("boom"))
+    with patch, pytest.raises(ValueError):
+        handler.check_external_position_break()

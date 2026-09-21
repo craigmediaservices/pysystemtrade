@@ -1,3 +1,5 @@
+import asyncio
+
 from syscore.constants import arg_not_supplied
 
 from sysexecution.stack_handler.stackHandlerCore import stackHandlerCore
@@ -28,9 +30,22 @@ class stackHandlerChecks(stackHandlerCore):
 
     def check_external_position_break(self):
         data_broker = dataBroker(self.data)
-        breaks = (
-            data_broker.get_list_of_breaks_between_broker_and_db_contract_positions()
-        )
+        try:
+            breaks = (
+                data_broker.get_list_of_breaks_between_broker_and_db_contract_positions()
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            # IB did not answer a contract lookup within the request timeout
+            # (2026-09-18, 2026-09-21: this ended the process). Unlike
+            # reqAllOpenOrders (see ibExecutionStackData) these requests carry
+            # their own reqId, so a late reply lands in an already-cancelled
+            # future and cannot poison the next request: skip this pass and
+            # check again next time round.
+            self.log.warning(
+                "IB did not answer within the request timeout during the "
+                "position-break check; skipping this pass"
+            )
+            return
 
         self.log_and_lock_new_breaks(breaks)
         self.clear_position_locks_where_breaks_fixed(breaks)
