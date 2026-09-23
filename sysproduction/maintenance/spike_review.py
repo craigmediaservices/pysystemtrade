@@ -44,7 +44,7 @@ LOG_DIR = os.path.expanduser("~/logs")
 
 
 def flagged_contracts_from_logs(date: datetime.date) -> list:
-    pat = re.compile(r"Spike found in prices for ([A-Z_0-9-]+)/(\d{8})")
+    pat = re.compile(r"Spike found in prices for ([A-Za-z_0-9-]+)/(\d{8})")
     files = [os.path.join(LOG_DIR, "pysystemtrade.log")] + glob.glob(
         os.path.join(LOG_DIR, "pysystemtrade.log.%s" % date.isoformat())
     )
