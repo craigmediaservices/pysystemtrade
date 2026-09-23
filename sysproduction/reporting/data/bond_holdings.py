@@ -279,6 +279,10 @@ DEFAULT_CASH_BUFFER_FLOOR = 100000.0
 DEFAULT_PNL_WINDOW_DAYS = 250
 DEFAULT_LADDER_MONTHS = 6
 DEFAULT_TRADE_ROUNDING = 10000.0
+# Smallest ticket worth doing. Separate from the rounding increment on
+# purpose: the user does not want a 10k purchase (the spread eats it), but
+# a 150k deployable should still buy 150k, not round down to 100k.
+DEFAULT_MIN_PURCHASE = 100000.0
 # Bills are treated as fully counted toward margin if the unexplained gap in
 # excess liquidity is under this fraction of net liquidation
 COLLATERAL_TOLERANCE = 0.02
@@ -310,6 +314,7 @@ def get_cash_buffer_settings(data: dataBlob) -> dict:
       tbill_pnl_window_days    lookback for realised daily P&L sd (default 250)
       tbill_ladder_months      ladder length in months (default 6)
       tbill_trade_rounding     round suggested purchases to this (default 10,000)
+      tbill_min_purchase       smallest purchase worth making (default 100,000)
     """
     fixed = _config_value(data, "tbill_cash_buffer", None)
     return dict(
@@ -331,6 +336,9 @@ def get_cash_buffer_settings(data: dataBlob) -> dict:
         ),
         rounding=float(
             _config_value(data, "tbill_trade_rounding", DEFAULT_TRADE_ROUNDING)
+        ),
+        min_purchase=float(
+            _config_value(data, "tbill_min_purchase", DEFAULT_MIN_PURCHASE)
         ),
     )
 
@@ -524,6 +532,7 @@ def suggested_action(
     rounding: float = DEFAULT_TRADE_ROUNDING,
     collateral_ok: bool = True,
     maturity_dates=None,
+    min_purchase: float = DEFAULT_MIN_PURCHASE,
 ) -> str:
     """
     One-line ACTION suggestion. Informational only - nothing here trades.
@@ -549,7 +558,8 @@ def suggested_action(
 
     spare = deployable_cash(usd_cash, buffer)
     amount = round_down_to(spare, rounding)
-    if amount < rounding or amount <= 0:
+    floor = max(rounding, float(min_purchase))
+    if amount < floor or amount <= 0:
         if usd_cash < buffer:
             return (
                 "ACTION: none - cash (%s) is below the buffer (%s). Let the next "
@@ -557,8 +567,9 @@ def suggested_action(
                 % (format(round(usd_cash), ","), format(round(buffer), ","))
             )
         return (
-            "ACTION: none. Deployable cash (%s) is under the trade rounding."
-            % format(round(spare), ",")
+            "ACTION: none. Deployable cash (%s) is under the minimum purchase "
+            "(%s) - let it build up rather than paying the spread on a small "
+            "ticket." % (format(round(spare), ","), format(round(floor), ","))
         )
 
     target, why = next_rung_month(
@@ -730,6 +741,7 @@ def compute_ladder_state(data: dataBlob) -> dict:
         asof_date=today,
         months=settings["ladder_months"],
         rounding=settings["rounding"],
+        min_purchase=settings["min_purchase"],
         collateral_ok=state["collateral_ok"],
         maturity_dates=maturity_dates_from_bond_df(bond_df),
     )

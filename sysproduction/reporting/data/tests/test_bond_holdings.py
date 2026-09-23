@@ -275,9 +275,10 @@ def test_suggested_action_none_cases():
     # below buffer -> let maturity land
     text = suggested_action(150000.0, 220000.0, [], asof, 6, 10000.0)
     assert text.startswith("ACTION: none") and "below the buffer" in text
-    # above buffer but under rounding
+    # above buffer but too small a ticket (message changed 2026-09-23 when the
+    # minimum purchase was split out from the rounding increment)
     text = suggested_action(225000.0, 220000.0, [], asof, 6, 10000.0)
-    assert text.startswith("ACTION: none") and "rounding" in text
+    assert text.startswith("ACTION: none") and "minimum purchase" in text
     # negative cash -> explicit warning, overrides everything
     text = suggested_action(-5000.0, 220000.0, ["2027-03"], asof, 6, 10000.0)
     assert "NEGATIVE" in text
@@ -316,3 +317,45 @@ def test_cash_available_for_bills_nets_negative_balances():
         cash_available_for_bills(304019.0, 221581.0), 198319.0, [], asof, 6, 10000.0
     )
     assert text.startswith("ACTION: buy ~20,000") or text.startswith("ACTION: none")
+
+
+# --- minimum purchase size (2026-09-23) ------------------------------------
+# User: "I never want to buy less than 100k at a time" - the spread on a small
+# bill ticket is not worth it. Separate from the rounding increment.
+
+
+def _action(spare_cash, buffer=100000.0, **kwargs):
+    return suggested_action(
+        usd_cash=spare_cash + buffer,
+        buffer=buffer,
+        gaps=[],
+        asof_date=datetime.date(2026, 9, 23),
+        maturity_dates=[],
+        **kwargs,
+    )
+
+
+def test_small_ticket_is_refused_by_default():
+    text = _action(15000.0)
+    assert text.startswith("ACTION: none") and "minimum purchase" in text
+
+
+def test_ticket_at_the_minimum_is_allowed():
+    assert _action(100000.0).startswith("ACTION: buy")
+
+
+def test_above_the_minimum_is_not_rounded_down_to_it():
+    # 150k deployable should buy 150k, not 100k - the minimum is a floor,
+    # not a rounding increment
+    text = _action(150000.0)
+    assert text.startswith("ACTION: buy") and "150,000" in text
+
+
+def test_minimum_is_configurable():
+    assert _action(20000.0, min_purchase=10000.0).startswith("ACTION: buy")
+
+
+def test_minimum_never_goes_below_the_rounding_increment():
+    # a nonsense min_purchase must not re-enable sub-rounding tickets
+    text = _action(5000.0, min_purchase=0.0, rounding=10000.0)
+    assert text.startswith("ACTION: none")
