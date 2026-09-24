@@ -20,8 +20,12 @@ import pexpect
 from sysproduction.maintenance import REPO_ROOT, work_path
 
 RE_CONTRACT = re.compile(r"Manually checking prices for (\S+)/(\d{8})")
+# Values may be NEGATIVE - PIPELINE and the other differential/spread markets
+# quote around zero. Without the -? the prompt never matched, pexpect blocked
+# until its 900s timeout, and the run hung with the row unaccepted (2026-09-24).
 RE_SPIKE = re.compile(
-    r"Value ([\d.]+) of FINAL on (\d{4}-\d{2}-\d{2}) [\d:]+ is a big change from previous value of ([\d.]+)"
+    r"Value (-?[\d.]+) of FINAL on (\d{4}-\d{2}-\d{2}) [\d:]+ "
+    r"is a big change from previous value of (-?[\d.]+)"
 )
 
 
