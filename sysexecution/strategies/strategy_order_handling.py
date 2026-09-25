@@ -10,6 +10,9 @@ from sysdata.data_blob import dataBlob
 from sysexecution.orders.list_of_orders import listOfOrders
 from sysexecution.orders.instrument_orders import instrumentOrder
 from sysexecution.order_stacks.instrument_order_stack import zeroOrderException
+from sysexecution.strategies.cancel_unsubmitted_orders import (
+    unsubmittedOrderCanceller,
+)
 from syslogging.logger import *
 from sysproduction.data.positions import diagPositions
 from sysproduction.data.instruments import diagInstruments
@@ -82,6 +85,15 @@ class orderGeneratorForStrategy(object):
     @property
     def order_stack(self):
         return self.data_orders.db_instrument_stack_data
+
+    @property
+    def unsubmitted_order_canceller(self) -> unsubmittedOrderCanceller:
+        canceller = getattr(self, "_unsubmitted_order_canceller", None)
+        if canceller is None:
+            canceller = self._unsubmitted_order_canceller = unsubmittedOrderCanceller(
+                self.data
+            )
+        return canceller
 
     def get_and_place_orders(self):
         # THIS IS THE MAIN FUNCTION THAT IS RUN
@@ -212,10 +224,33 @@ class orderGeneratorForStrategy(object):
     def submit_order(self, order: instrumentOrder):
         log_attrs = {**order.log_attributes(), "method": "temp"}
 
+        # An earlier order for this instrument that never reached the broker
+        # is retired rather than netted against (see cancel_unsubmitted_orders).
+        # If retiring fails part-way the family is in a half state that the
+        # residual logic would net wrongly: skip this instrument for this run.
+        try:
+            retired = self.unsubmitted_order_canceller.cancel_orders_superseded_by(
+                order
+            )
+        except Exception as e:
+            self.log.critical(
+                "Could not retire earlier unfilled order(s) (%s); not submitting %s "
+                "this run, will try again next run" % (str(e), str(order)),
+                **log_attrs,
+            )
+            return
+
         try:
             order_id = self.order_stack.put_order_on_stack(order)
             log_attrs[INSTRUMENT_ORDER_ID_LABEL] = order_id
         except zeroOrderException:
+            if len(retired) > 0:
+                self.log.warning(
+                    "Strategy now wants no trade; earlier order(s) %s retired, "
+                    "nothing placed" % str(retired),
+                    **log_attrs,
+                )
+                return
             # we checked for zero already, which means that there is an existing order
             # on the stack
             # An existing order of the same size
