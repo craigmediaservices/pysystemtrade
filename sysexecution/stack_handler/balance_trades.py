@@ -183,11 +183,15 @@ def create_balance_contract_order_from_broker_order(broker_order: brokerOrder):
 
 
 def create_balance_instrument_order_from_contract_order(contract_order):
+    # The strategy position moves by the NET of the legs: a spread balance
+    # trade [-2, +2] is flat at instrument level. Until 2026-09-28 this took
+    # the first leg only, so booking a spread by hand moved the strategy
+    # position by that leg.
     instrument_order = instrumentOrder(
         contract_order.strategy_name,
         contract_order.instrument_code,
-        contract_order.trade[0],
-        fill=contract_order.fill[0],
+        int(sum(contract_order.trade)),
+        fill=int(sum(contract_order.fill)),
         filled_price=contract_order.filled_price,
         fill_datetime=contract_order.fill_datetime,
         manual_trade=True,
