@@ -239,3 +239,36 @@ def test_position_break_check_does_not_swallow_other_errors():
     handler, patch = _checks(ValueError("boom"))
     with patch, pytest.raises(ValueError):
         handler.check_external_position_break()
+
+
+# --- a probe may opt out of the CRITICAL on connect failure (2026-09-28) -----
+
+
+def _failing_connection(critical_on_failure):
+    from sysbrokers.IB import ib_connection as ic
+
+    with mock.patch.object(ic, "ib_defaults", return_value=("127.0.0.1", 4001, 0)):
+        with mock.patch.object(
+            ic.connectionIB, "_init_connection", side_effect=OSError("refused")
+        ):
+            with mock.patch.object(ic, "get_logger") as get_logger:
+                log = get_logger.return_value
+                try:
+                    ic.connectionIB(999, critical_on_failure=critical_on_failure)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("connect failure must still raise")
+    return log
+
+
+def test_connect_failure_is_critical_by_default():
+    log = _failing_connection(critical_on_failure=True)
+    log.critical.assert_called_once()
+    log.warning.assert_not_called()
+
+
+def test_probe_can_downgrade_connect_failure_to_warning():
+    log = _failing_connection(critical_on_failure=False)
+    log.warning.assert_called_once()
+    log.critical.assert_not_called()

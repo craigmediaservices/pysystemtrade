@@ -190,3 +190,63 @@ def test_alive_process_is_not_crashed():
 def test_stopped_or_paused_process_is_never_crashed():
     rec = _control(status="STOP", pid=0, started=_minutes_ago(60), crashed=True)
     assert not rcp.looks_crashed(rec, NOW)
+
+
+# --- operator mode (2026-09-28): a human restart is not a crash -------------
+
+
+def test_operator_bypasses_daily_budget():
+    stamps = [_minutes_ago(300), _minutes_ago(200)]
+    assert rcp.restart_allowed(stamps, NOW, operator=True) == (True, "")
+
+
+def test_operator_bypasses_cooldown():
+    assert rcp.restart_allowed([_minutes_ago(5)], NOW, operator=True) == (True, "")
+
+
+def test_operator_restart_is_not_charged_to_the_budget():
+    history = {}
+    rcp.record_restart(history, "run_stack_handler", NOW, operator=True)
+    assert history == {}
+
+
+def test_cron_restart_is_charged_to_the_budget():
+    history = {}
+    rcp.record_restart(history, "run_stack_handler", NOW, operator=False)
+    assert history == {"run_stack_handler": [NOW]}
+
+
+# --- health check connects once, quietly (2026-09-28) ------------------------
+
+
+def _blob():
+    ids = mock.Mock()
+    ids.return_valid_client_id.return_value = 107
+    blob = SimpleNamespace(
+        log_name="Maintenance-Health-Check",
+        add_class_object=mock.Mock(),
+        db_ib_broker_client_id=ids,
+    )
+    return blob, ids
+
+
+def test_failed_connect_is_one_attempt_and_releases_the_client_id():
+    blob, ids = _blob()
+    with mock.patch.object(
+        hc, "connectionIB", side_effect=ConnectionRefusedError("refused :4001")
+    ) as conn:
+        connected, why = hc.connect_ib_once(blob)
+    assert not connected and "refused" in why
+    assert conn.call_count == 1
+    assert conn.call_args.kwargs["critical_on_failure"] is False
+    ids.release_clientid.assert_called_once_with(107)
+    assert not hasattr(blob, "_ib_conn")
+
+
+def test_successful_connect_is_handed_to_the_blob():
+    blob, ids = _blob()
+    fake = object()
+    with mock.patch.object(hc, "connectionIB", return_value=fake):
+        assert hc.connect_ib_once(blob) == (True, "")
+    assert blob._ib_conn is fake
+    ids.release_clientid.assert_not_called()

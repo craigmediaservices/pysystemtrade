@@ -49,13 +49,16 @@ class connectionIB(object):
         ib_port: int = arg_not_supplied,
         account: str = arg_not_supplied,
         log_name: str = "connectionIB",
+        critical_on_failure: bool = True,
     ):
         """
         :param client_id: client id
         :param ipaddress: IP address of machine running IB Gateway or TWS. If not passed then will get from private config file, or defaults
         :param port: Port listened to by IB Gateway or TWS
         :param log_name: calling log name
-        :param mongo_db: mongoDB connection
+        :param critical_on_failure: log a failed connect as CRITICAL (emailed).
+               A read-only probe that reports the failure itself passes False
+               and gets a WARNING instead.
         """
 
         # resolve defaults
@@ -89,9 +92,11 @@ class connectionIB(object):
             # Log all exceptions generated during connection as critical error.
             # Under the default production setup this should send an email.
             # Error is reraised as we can't really continue and user intervention is required
-            self.log.critical(
-                f"IB connection failed with exception - {e}, connection aborted."
-            )
+            msg = f"IB connection failed with exception - {e}, connection aborted."
+            if critical_on_failure:
+                self.log.critical(msg)
+            else:
+                self.log.warning(msg)
             raise
 
     def _init_connection(

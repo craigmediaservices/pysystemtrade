@@ -10,7 +10,9 @@ import os
 import socket
 import sys
 
+from sysbrokers.IB.ib_connection import connectionIB
 from sysdata.data_blob import dataBlob
+from sysdata.mongodb.mongo_IB_client_id import mongoIbBrokerClientIdData
 from sysproduction.data.broker import dataBroker
 from sysproduction.data.control_process import dataControlProcess, diagControlProcess
 from sysproduction.data.orders import dataOrders
@@ -171,6 +173,29 @@ def should_be_running(control, name: str, now: datetime.datetime) -> bool:
     return start <= now.time() < stop
 
 
+def connect_ib_once(data: dataBlob) -> tuple:
+    """
+    (connected, reason). ONE connection attempt, logged at WARNING on failure.
+
+    dataBlob.ib_conn retries six times and connectionIB logs each failure as
+    CRITICAL (= an email), so a blocked gateway turned every health check into
+    a dozen emails in a minute (2026-09-16). A read-only probe reports the
+    failure itself as a RED line; it does not need to page anyone.
+    """
+    data.add_class_object(mongoIbBrokerClientIdData)
+    client_id = int(data.db_ib_broker_client_id.return_valid_client_id())
+    try:
+        conn = connectionIB(
+            client_id, log_name=data.log_name, critical_on_failure=False
+        )
+    except Exception as e:
+        data.db_ib_broker_client_id.release_clientid(client_id)
+        return False, str(e) or type(e).__name__
+    # hand it to the blob so dataBroker etc. reuse it and close() releases it
+    data._ib_conn = conn
+    return True, ""
+
+
 def health_check(verbose: bool = True) -> list:
     problems = []
     now = datetime.datetime.now()
@@ -211,37 +236,39 @@ def health_check(verbose: bool = True) -> list:
                     )
                 )
 
-        ib = data.ib_conn.ib
-        connected = ib.isConnected()
+        connected, why = connect_ib_once(data)
         if verbose:
-            print("--- IB connected:", connected)
+            print("--- IB connected:", connected, "" if connected else "(%s)" % why)
         if not connected:
-            problems.append("IB not connected")
+            problems.append("IB not connected (%s): broker checks skipped" % why)
 
         dp = diagPositions(data)
-        db = dataBroker(data)
-        b1 = db.get_list_of_breaks_between_broker_and_db_contract_positions()
         b2 = dp.get_list_of_breaks_between_contract_and_strategy_positions()
+        if connected:
+            db = dataBroker(data)
+            b1 = db.get_list_of_breaks_between_broker_and_db_contract_positions()
+            if verbose:
+                print("--- breaks broker vs DB:", b1)
+            if b1:
+                problems.append("broker/DB breaks: %s" % b1)
         if verbose:
-            print("--- breaks broker vs DB:", b1)
             print("--- breaks contract vs strategy:", b2)
-        if b1:
-            problems.append("broker/DB breaks: %s" % b1)
         if b2:
             problems.append("contract/strategy breaks: %s" % b2)
 
-        open_trades = ib.openTrades()
-        if verbose:
-            print("--- IB open orders: %d" % len(open_trades))
-            for t in open_trades:
-                print(
-                    "   ",
-                    t.contract.localSymbol or t.contract.symbol,
-                    t.order.action,
-                    t.order.totalQuantity,
-                    t.order.orderType,
-                    t.orderStatus.status,
-                )
+        if connected:
+            open_trades = data.ib_conn.ib.openTrades()
+            if verbose:
+                print("--- IB open orders: %d" % len(open_trades))
+                for t in open_trades:
+                    print(
+                        "   ",
+                        t.contract.localSymbol or t.contract.symbol,
+                        t.order.action,
+                        t.order.totalQuantity,
+                        t.order.orderType,
+                        t.orderStatus.status,
+                    )
 
         do = dataOrders(data)
         if verbose:

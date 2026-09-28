@@ -14,6 +14,11 @@ monitor usually won the race and a crashed run_stack_handler was taken for
 
     python3 sysproduction/maintenance/restart_crashed_processes.py            # do it
     python3 sysproduction/maintenance/restart_crashed_processes.py --dry-run  # show only
+    python3 sysproduction/maintenance/restart_crashed_processes.py --operator # by hand
+
+--operator is for a human who has just killed a process on purpose (redeploy,
+manual recovery): it ignores the restart budget and cooldown, logs at WARNING
+instead of CRITICAL (no email), and does not count against the cron budget.
 
 Restart uses the same wrapper scripts as cron:
     . ~/.profile; nohup $SCRIPT_PATH/<script> >> $ECHO_PATH/<script>.txt 2>&1 &
@@ -76,10 +81,15 @@ def save_restart_history(history: dict):
     os.replace(tmp, STATE_FILE)
 
 
-def restart_allowed(stamps: list, now: datetime.datetime) -> tuple:
+def restart_allowed(
+    stamps: list, now: datetime.datetime, operator: bool = False
+) -> tuple:
     """
     (allowed, reason). Pure, unit-tested. stamps = previous restart times.
+    operator=True: a human asked for this restart; the budget does not apply.
     """
+    if operator:
+        return True, ""
     today = [t for t in stamps if t.date() == now.date()]
     if len(today) >= MAX_RESTARTS_PER_DAY:
         return False, "already restarted %d times today" % len(today)
@@ -88,6 +98,17 @@ def restart_allowed(stamps: list, now: datetime.datetime) -> tuple:
         if minutes < MIN_MINUTES_BETWEEN:
             return False, "last restart only %d min ago" % int(minutes)
     return True, ""
+
+
+def record_restart(history: dict, name: str, now: datetime.datetime, operator: bool):
+    """
+    Charge the restart to the budget unless a human asked for it: an
+    operator restart says nothing about the process dying on its own, and on
+    2026-09-16 a deliberate redeploy ate the cron's second slot for the day.
+    """
+    if operator:
+        return
+    history.setdefault(name, []).append(now)
 
 
 def looks_crashed(record, now: datetime.datetime) -> bool:
@@ -145,11 +166,14 @@ def restart_process(script_name: str):
     subprocess.Popen(["bash", "-c", cmd], cwd=os.path.expanduser("~"))
 
 
-def restart_crashed_processes(dry_run: bool = False) -> list:
+def restart_crashed_processes(dry_run: bool = False, operator: bool = False) -> list:
     now = datetime.datetime.now()
     restarted = []
     history = load_restart_history()
     with dataBlob(log_name="Maintenance-Restart-Processes") as data:
+        # an unattended restart is an event worth an email; a human doing it
+        # by hand is not
+        log_event = data.log.warning if operator else data.log.critical
         control = dataControlProcess(data)
 
         # step 0: alive but hung (no log output) -> kill, so step 1 sees it dead
@@ -163,7 +187,7 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
             hung, detail = process_looks_hung(name, c, now)
             if not hung:
                 continue
-            allowed, why = restart_allowed(history.get(name, []), now)
+            allowed, why = restart_allowed(history.get(name, []), now, operator)
             msg = "%s alive (pid %s) but hung: %s" % (name, int(c.process_id), detail)
             if not allowed:
                 print("   %s - NOT killing: %s" % (msg, why))
@@ -174,7 +198,7 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
                 continue
             print("   %s -> %s" % (msg, "would kill" if dry_run else "killing"))
             if not dry_run:
-                data.log.critical("%s; killing and restarting" % msg)
+                log_event("%s; killing and restarting" % msg)
                 # step 1 marks the dead pid closed, step 2 restarts within budget
                 if not kill_process(c.process_id, SCRIPT_FOR_PROCESS[name]):
                     data.log.error(
@@ -210,7 +234,7 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
             if not should_be_running(control, name, now):
                 print("   %s crashed but outside its window - leave" % name)
                 continue
-            allowed, why = restart_allowed(history.get(name, []), now)
+            allowed, why = restart_allowed(history.get(name, []), now, operator)
             if not allowed:
                 print("   %s should be running - NOT restarting: %s" % (name, why))
                 if not dry_run:
@@ -228,10 +252,11 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
             if not dry_run:
                 restart_process(script)
                 restarted.append(name)
-                history.setdefault(name, []).append(now)
+                record_restart(history, name, now, operator)
 
     if restarted:
-        save_restart_history(history)
+        if not operator:
+            save_restart_history(history)
         time.sleep(25)
         with dataBlob(log_name="Maintenance-Restart-Processes") as data:
             procs = dataControlProcess(data).get_dict_of_control_processes()
@@ -245,4 +270,6 @@ def restart_crashed_processes(dry_run: bool = False) -> list:
 
 
 if __name__ == "__main__":
-    restart_crashed_processes(dry_run="--dry-run" in sys.argv)
+    restart_crashed_processes(
+        dry_run="--dry-run" in sys.argv, operator="--operator" in sys.argv
+    )
