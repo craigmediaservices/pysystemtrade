@@ -15,7 +15,12 @@ import datetime
 import re
 import sys
 
-import pexpect
+try:
+    import pexpect
+except ImportError:  # pragma: no cover - only the regex helpers are importable then
+    # The regexes below are unit-tested on machines (CI) without pexpect;
+    # driving the real tool needs it, and spawn fails loudly if it is missing.
+    pexpect = None
 
 from sysproduction.maintenance import REPO_ROOT, work_path
 
@@ -45,6 +50,8 @@ def spike_accept(date: datetime.date):
     if not instruments:
         return
 
+    if pexpect is None:
+        raise ImportError("spike_accept needs pexpect: python3 -m pip install pexpect")
     child = pexpect.spawn(
         "python3 sysproduction/interactive_manual_check_historical_prices.py",
         cwd=REPO_ROOT,

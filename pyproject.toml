@@ -39,7 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 arctic = ["arctic @ git+https://github.com/man-group/arctic.git"]
-dev = ["pytest>6.2", "black==23.11.0"]
+dev = ["pytest>6.2", "black==23.11.0", "pexpect"]
 
 [project.urls]
 "Homepage" = "https://github.com/pst-group/pysystemtrade"
