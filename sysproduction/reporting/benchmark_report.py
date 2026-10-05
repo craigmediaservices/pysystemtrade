@@ -39,6 +39,7 @@ from sysproduction.reporting.data.benchmarks import (
     get_benchmark_returns,
     performance_stats,
     vol_adjusted_returns,
+    get_cash_returns,
     relative_stats,
     correlation_matrix,
 )
@@ -53,7 +54,10 @@ INTRO_STR = (
     "your annual review - NOT the capped notional capital. Stats are COMPOUNDED "
     "(geometric total return, the basis IBKR and fund fact-sheets quote). Two views: "
     "'as-is' raw; 'rescaled to common vol' puts every fund at the same annualised "
-    "risk for a like-for-like read. ALL funds are measured over my fund's window "
+    "risk for a like-for-like read: only the return ABOVE cash (BIL T-bill ETF) is "
+    "rescaled, then cash is added back, and Sharpe/Sortino are on return above "
+    "cash - otherwise rescaling would shrink my cash yield and inflate the "
+    "low-vol ETFs'. ALL funds are measured over my fund's window "
     "(same start date); columns show all-time (since my start), YTD and 12-month. "
     "'Corr S&P' = correlation to the S&P 500 (lower = better diversifier). Chart "
     "lines are labelled at their right end, stacked by final value (top = best), "
@@ -391,12 +395,18 @@ def benchmark_report(
     ]
     ctx_label_map = {OWN_LABEL: OWN_LABEL}
     ctx_label_map.update(CONTEXT_BENCHMARKS)
-    ctx_scaled = vol_adjusted_returns(ctx_panel, target_vol=target_vol_pct / 100.0)
+    cash = get_cash_returns()
+    target_vol = target_vol_pct / 100.0
+    ctx_scaled = vol_adjusted_returns(ctx_panel, target_vol, cash_returns=cash)
 
     # EVERYTHING is measured over my fund's window (no mixed per-fund start dates)
-    common_scaled = vol_adjusted_returns(common, target_vol=target_vol_pct / 100.0)
-    common_stats = performance_stats(common, label_map=label_map, corr_to=spy_ret)
-    scaled_stats = performance_stats(common_scaled, label_map=label_map)
+    common_scaled = vol_adjusted_returns(common, target_vol, cash_returns=cash)
+    common_stats = performance_stats(
+        common, label_map=label_map, corr_to=spy_ret, cash_returns=cash
+    )
+    scaled_stats = performance_stats(
+        common_scaled, label_map=label_map, cash_returns=cash
+    )
     rel = relative_stats(common, reference, label_map=label_map)
     corr_mat = correlation_matrix(common, label_map=label_map)
 
@@ -411,7 +421,7 @@ def benchmark_report(
     # which sits at each fund's own return level).
     cutoff_12m = live_end - pd.Timedelta(days=365)
     last12 = common.loc[cutoff_12m:]
-    last12_scaled = vol_adjusted_returns(last12, target_vol=target_vol_pct / 100.0)
+    last12_scaled = vol_adjusted_returns(last12, target_vol, cash_returns=cash)
     styles = _assign_styles(panel.columns)
     ctx_styles = _assign_styles(ctx_panel.columns)
 

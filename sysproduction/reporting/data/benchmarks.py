@@ -63,6 +63,12 @@ CONTEXT_BENCHMARKS = {
 }
 SP500_TICKER = "SPY"
 
+# Cash proxy (1-3 month T-bill ETF). Every series - mine and the ETFs' - includes
+# the yield on its cash collateral, so vol-rescaling and Sharpe must work on return
+# ABOVE cash, otherwise rescaling shrinks a high-vol fund's cash yield and inflates
+# a low-vol fund's. Fetched with the peers but never shown as one.
+CASH_TICKER = "BIL"
+
 TIINGO_URL = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
 DEFAULT_LOOKBACK_YEARS = 15
 # re-request the last few cached days each run to pick up Tiingo adjClose revisions
@@ -208,7 +214,11 @@ def update_benchmark_cache(
     Never raises on a single-ticker failure - records it and moves on.
     """
     if tickers is arg_not_supplied:
-        tickers = list(DEFAULT_BENCHMARKS.keys()) + list(CONTEXT_BENCHMARKS.keys())
+        tickers = (
+            list(DEFAULT_BENCHMARKS.keys())
+            + list(CONTEXT_BENCHMARKS.keys())
+            + [CASH_TICKER]
+        )
     if token is arg_not_supplied:
         token = get_tiingo_token()
 
@@ -293,7 +303,7 @@ def get_benchmark_returns(tickers=arg_not_supplied, cache_dir=DEFAULT_CACHE_DIR)
 # textbook definition and the annual review (~0.81):
 #   ann return = BUSINESS_DAYS_IN_YEAR * mean     (256 * mean, arithmetic)
 #   ann vol    = ROOT_BDAYS_INYEAR    * std       (16 * std)
-#   Sharpe     = ann return / ann vol
+#   Sharpe     = ann return / ann vol, on return ABOVE cash when cash is given
 # Applied identically to my fund and every peer, so it stays apples-to-apples.
 # ---------------------------------------------------------------------------
 def _ann_vol(returns):
@@ -313,11 +323,27 @@ def _period_return(returns, start):
     return (1 + window).prod() - 1
 
 
-def performance_stats(returns_df, label_map=None, corr_to=None):
+def get_cash_returns(cache_dir=DEFAULT_CACHE_DIR):
+    """Daily cash (T-bill) returns, or None if the cash proxy isn't cached."""
+    cash = get_benchmark_returns(tickers=[CASH_TICKER], cache_dir=cache_dir)
+    if cash.empty or CASH_TICKER not in cash.columns:
+        return None
+    return cash[CASH_TICKER]
+
+
+def _excess(r, cash_returns):
+    if cash_returns is None:
+        return r
+    return r - cash_returns.reindex(r.index).fillna(0.0)
+
+
+def performance_stats(returns_df, label_map=None, corr_to=None, cash_returns=None):
     """One row per series, columns = metrics. Each series uses its own history.
 
     corr_to: optional daily-returns Series (e.g. SPY) -> adds a 'Corr S&P' column
     = each fund's correlation to it over the overlapping dates.
+    cash_returns: optional daily cash returns -> Sharpe/Sortino use return above
+    cash (the textbook definition); returns/vol/drawdown stay total.
     """
     label_map = label_map or {}
     today = pd.Timestamp(datetime.date.today())
@@ -333,9 +359,12 @@ def performance_stats(returns_df, label_map=None, corr_to=None):
         # arithmetic annualised return for the STANDARD Sharpe (ties annual review)
         ann_ret = r.mean() * BUSINESS_DAYS_IN_YEAR
         vol = _ann_vol(r)
-        sharpe = ann_ret / vol if vol > 0 else np.nan
-        downside = r[r < 0].std() * ROOT_BDAYS_INYEAR
-        sortino = ann_ret / downside if downside and downside > 0 else np.nan
+        xs = _excess(r, cash_returns)
+        xs_ret = xs.mean() * BUSINESS_DAYS_IN_YEAR
+        xs_vol = _ann_vol(xs)
+        sharpe = xs_ret / xs_vol if xs_vol > 0 else np.nan
+        downside = xs[xs < 0].std() * ROOT_BDAYS_INYEAR
+        sortino = xs_ret / downside if downside and downside > 0 else np.nan
         dd = _drawdown(r)
         row = {
             "Fund": label_map.get(col, col),
@@ -365,13 +394,23 @@ def performance_stats(returns_df, label_map=None, corr_to=None):
     return out
 
 
-def vol_adjusted_returns(returns_df, target_vol=0.15):
-    """Rescale each column to a common annualised vol so curves are comparable."""
+def vol_adjusted_returns(returns_df, target_vol=0.15, cash_returns=None):
+    """Rescale each column to a common annualised vol so curves are comparable.
+
+    With cash_returns, only the return ABOVE cash is rescaled and cash is added
+    back unscaled - like running each fund at the target vol on the same collateral.
+    Scaling the total instead shrinks a high-vol fund's cash yield and inflates a
+    low-vol fund's (at ~4% rates and 15% vs ~30% vol that's worth ~2%/yr each way).
+    """
     scaled = returns_df.copy()
     for col in scaled.columns:
-        realized = _ann_vol(scaled[col].dropna())
+        r = scaled[col].dropna()
+        xs = _excess(r, cash_returns)
+        realized = _ann_vol(xs)
         if realized and realized > 0:
-            scaled[col] = scaled[col] * (target_vol / realized)
+            scaled[col] = (xs * (target_vol / realized) + (r - xs)).reindex(
+                scaled.index
+            )
     return scaled
 
 
