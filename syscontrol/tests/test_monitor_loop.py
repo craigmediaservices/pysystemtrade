@@ -76,3 +76,26 @@ def test_recovery_resets_the_count_and_says_so():
     ), mock.patch.object(mon, "generate_html"):
         assert mon.monitor_pass(mock.Mock(), log, 3) == 0
     assert "recovered" in log.warning.call_args.args[0]
+
+
+def test_failing_logger_does_not_kill_the_monitor(capsys):
+    log = mock.Mock()
+    log.error.side_effect = ConnectionRefusedError("log server down")
+    log.critical.side_effect = ConnectionRefusedError("smtp down")
+    obs = _failing_observatory()
+    with mock.patch.object(mon, "check_if_pid_running_and_if_not_finish"):
+        assert mon.monitor_pass(obs, log, 0) == 1
+        assert (
+            mon.monitor_pass(obs, log, mon.FAILURES_BEFORE_CRITICAL - 1)
+            == mon.FAILURES_BEFORE_CRITICAL
+        )
+    assert "logging failed" in capsys.readouterr().out
+
+
+def test_failing_logger_on_recovery_does_not_kill_the_monitor():
+    log = mock.Mock()
+    log.warning.side_effect = ConnectionRefusedError("log server down")
+    with mock.patch.object(
+        mon, "check_if_pid_running_and_if_not_finish"
+    ), mock.patch.object(mon, "generate_html"):
+        assert mon.monitor_pass(mock.Mock(), log, 3) == 0

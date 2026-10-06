@@ -33,6 +33,15 @@ def monitor():
             )
 
 
+def _log_or_print(log_method, msg: str):
+    # the logger itself (log server, SMTP) can be what is failing; that must
+    # not kill the monitor either
+    try:
+        log_method(msg)
+    except Exception as e:
+        print("%s [logging failed: %r]" % (msg, e), flush=True)
+
+
 def monitor_pass(process_observatory, log, consecutive_failures: int) -> int:
     """
     One pass of the monitor loop; returns the new consecutive failure count.
@@ -56,14 +65,15 @@ def monitor_pass(process_observatory, log, consecutive_failures: int) -> int:
             % FAILURES_BETWEEN_REPEAT_CRITICALS
             == 0
         ):
-            log.critical(msg)
+            _log_or_print(log.critical, msg)
         else:
-            log.error(msg)
+            _log_or_print(log.error, msg)
         return failures
 
     if consecutive_failures:
-        log.warning(
-            "System monitor recovered after %d failed passes" % consecutive_failures
+        _log_or_print(
+            log.warning,
+            "System monitor recovered after %d failed passes" % consecutive_failures,
         )
     return 0
 
