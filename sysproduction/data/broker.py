@@ -11,7 +11,7 @@ from sysbrokers.broker_capital_data import brokerCapitalData
 from sysbrokers.broker_contract_position_data import brokerContractPositionData
 from sysbrokers.broker_fx_prices_data import brokerFxPricesData
 from sysbrokers.broker_instrument_data import brokerFuturesInstrumentData
-from syscore.exceptions import missingData
+from syscore.exceptions import missingContract, missingData
 
 from syscore.constants import arg_not_supplied
 from sysexecution.orders.named_order_objects import missing_order
@@ -311,7 +311,9 @@ class dataBroker(productionDataLayerGeneric):
             market_conditions = self.get_market_conditions_for_contract_order_by_leg(
                 contract_order
             )
-        except missingData:
+        except (missingData, missingContract):
+            # missingContract: IB contract lookup failed (e.g. connectivity loss,
+            # Error 200) -- killed run_stack_handler on 2026-10-06 03:32
             self.log.warning(
                 "Can't get market conditions, setting available size to zero"
             )

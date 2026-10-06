@@ -3,7 +3,12 @@ This is the original 'best execution' algo I used in my legacy system
 """
 
 import time
-from syscore.exceptions import missingData, marketClosed, orderCannotBeModified
+from syscore.exceptions import (
+    missingContract,
+    missingData,
+    marketClosed,
+    orderCannotBeModified,
+)
 from sysexecution.orders.named_order_objects import missing_order
 
 from sysexecution.algos.algo import (
@@ -108,9 +113,20 @@ class algoOriginalBest(Algo):
                 **log_attrs,
             )
 
-        ticker_object = self.data_broker.get_ticker_object_for_order(
-            cut_down_contract_order
-        )
+        try:
+            ticker_object = self.data_broker.get_ticker_object_for_order(
+                cut_down_contract_order
+            )
+        except (missingData, missingContract):
+            ## IB can't resolve the contract / no data (e.g. connectivity loss):
+            ## don't trade; caller releases the algo lock on missing_order
+            data.log.warning(
+                "Can't get ticker for %s, not trading this pass"
+                % str(cut_down_contract_order),
+                **log_attrs,
+            )
+            return missing_order
+
         try:
             okay_to_do_limit_trade = self.limit_trade_viable(
                 ticker_object=ticker_object,

@@ -92,7 +92,13 @@ class Algo(object):
         broker_clientid = self.data_broker.get_broker_clientid()
 
         if ticker_object is None:
-            ticker_object = self.data_broker.get_ticker_object_for_order(contract_order)
+            try:
+                ticker_object = self.data_broker.get_ticker_object_for_order(
+                    contract_order
+                )
+            except (missingData, missingContract):
+                # IB can't resolve the contract / no data: don't submit
+                return missing_order
 
         try:
             collected_prices = self.get_market_data_for_order_modifies_ticker_object(
