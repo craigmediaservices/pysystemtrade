@@ -244,3 +244,93 @@ def test_resolve_fx_order_direct_and_inverted():
         "JPY", "USD", -1540100, True, 154.00, 154.02
     )
     assert (pair, action, qty, px) == ("USDJPY", "BUY", 10000, 154.02)
+
+
+# --- the sweep must not re-size a currency with an FX order still working -----
+
+from types import SimpleNamespace
+from unittest import mock
+
+
+def _fx_trade(order_id, symbol, currency, sec_type="CASH", done=False):
+    return SimpleNamespace(
+        contract=SimpleNamespace(secType=sec_type, symbol=symbol, currency=currency),
+        order=SimpleNamespace(
+            orderId=order_id,
+            action="SELL",
+            totalQuantity=33389.0,
+            orderType="LMT",
+            lmtPrice=1.15432,
+        ),
+        orderStatus=SimpleNamespace(status="Submitted", filled=0.0),
+        isDone=lambda: done,
+    )
+
+
+def _run_sweep(open_orders):
+    """Drive the live (not dry-run) sweep with every prompt answered yes and
+    record what it would place. open_orders: list, or an exception to raise."""
+    from sysproduction import interactive_fx_sweep as fx
+
+    # trade sizes from test_resolve_fx_order_direct_and_inverted above
+    suggestions = pd.DataFrame(
+        dict(approx_trade_qty=[-33389, 16991, 2860865]),
+        index=pd.Index(["EUR", "CHF", "JPY"], name="currency"),
+    )
+
+    def req_all_open_orders():
+        if isinstance(open_orders, BaseException):
+            raise open_orders
+        return open_orders
+
+    data = SimpleNamespace(
+        ib_conn=SimpleNamespace(
+            ib=SimpleNamespace(reqAllOpenOrders=req_all_open_orders)
+        )
+    )
+    broker = SimpleNamespace(
+        get_margin_used_in_base_currency=lambda: 0.0,
+        get_broker_account=lambda: "U0",
+    )
+    placed = []
+    with mock.patch.object(fx, "dataBroker", lambda d: broker), mock.patch.object(
+        fx, "dataCurrency", lambda d: SimpleNamespace(get_base_currency=lambda: "USD")
+    ), mock.patch.object(
+        fx, "get_fx_balances_as_df", lambda d: pd.DataFrame()
+    ), mock.patch.object(
+        fx, "get_fx_balance_alert_threshold", lambda d: 10000.0
+    ), mock.patch.object(
+        fx, "get_fx_balance_buffers", lambda d: {}
+    ), mock.patch.object(
+        fx, "get_fx_sweep_suggestions", lambda *a, **k: suggestions
+    ), mock.patch.object(
+        fx, "get_input_from_user_and_convert_to_type", lambda *a, **k: 10000.0
+    ), mock.patch.object(
+        # dry run? no; LIMIT? yes; place? yes
+        fx,
+        "true_if_answer_is_yes",
+        lambda prompt, *a, **k: not prompt.startswith("Dry run"),
+    ), mock.patch.object(
+        fx, "_place_fx_order", lambda **k: placed.append(k["ccy1"])
+    ), mock.patch(
+        "builtins.print"
+    ):
+        fx._interactive_fx_sweep(data)
+    return placed
+
+
+def test_fx_sweep_places_all_when_nothing_is_working():
+    done = _fx_trade(1, "EUR", "USD", done=True)
+    future = _fx_trade(2, "EUR", "USD", sec_type="FUT")
+    assert _run_sweep([done, future]) == ["EUR", "CHF", "JPY"]
+
+
+def test_fx_sweep_skips_currencies_with_a_working_fx_order():
+    # a LIMIT left working from a previous run on EUR.USD, and one on USD.JPY
+    # (IB lists yen the other way round): only CHF may be swept
+    working = [_fx_trade(7, "EUR", "USD"), _fx_trade(8, "USD", "JPY")]
+    assert _run_sweep(working) == ["CHF"]
+
+
+def test_fx_sweep_places_nothing_if_open_orders_cannot_be_listed():
+    assert _run_sweep(ConnectionError("not connected")) == []

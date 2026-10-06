@@ -108,6 +108,21 @@ def _interactive_fx_sweep(data: dataBlob):
     broker_account = data_broker.get_broker_account()
     print("Account: %s" % broker_account)
 
+    # sizes come from settled cash only: a conversion still working at IB
+    # (e.g. a LIMIT left from a previous run) is not in the balances yet, so
+    # sweeping that currency again would double-trade
+    try:
+        working = working_fx_orders(data.ib_conn.ib)
+    except BaseException as e:
+        print(
+            "\nCould not list open orders at IB (%s) - cannot rule out a working "
+            "FX conversion, so NOTHING will be placed. Check TWS and re-run." % e
+        )
+        if not dry_run:
+            return None
+        working = []
+    _print_working_fx_orders(working)
+
     use_limit = False
     if not dry_run:
         use_limit = true_if_answer_is_yes(
@@ -118,6 +133,21 @@ def _interactive_fx_sweep(data: dataBlob):
         ccy1 = currency
         ccy2 = base_currency
         trade_qty = int(row["approx_trade_qty"])
+
+        pending = working_orders_for_currency(working, ccy1)
+        if pending:
+            print(
+                "\n--- %s: SKIPPED - %d FX order(s) in %s still working at IB (%s). "
+                "Its balance does not include them yet, so sweeping it now could "
+                "double-trade. Let them fill or cancel them, then re-run. ---"
+                % (
+                    ccy1,
+                    len(pending),
+                    ccy1,
+                    ", ".join(str(t.order.orderId) for t in pending),
+                )
+            )
+            continue
 
         side = "SELL" if trade_qty < 0 else "BUY"
         order_type = "LIMIT" if use_limit else "MARKET"
@@ -155,6 +185,50 @@ def _interactive_fx_sweep(data: dataBlob):
         "report) afterwards to confirm balances.\n"
     )
     return None
+
+
+def working_fx_orders(ib) -> list:
+    """
+    Open spot FX (secType CASH) orders at IB that are not done, across all
+    clients. Raises if IB cannot list them: callers must fail closed.
+    """
+    return [
+        t
+        for t in ib.reqAllOpenOrders()
+        if getattr(t.contract, "secType", "") == "CASH" and not t.isDone()
+    ]
+
+
+def working_orders_for_currency(working: list, currency: str) -> list:
+    """Working FX orders whose pair has `currency` on either side (EUR.USD or
+    USD.JPY: IB's symbol is the first leg, currency the second)."""
+    return [
+        t
+        for t in working
+        if currency
+        in (getattr(t.contract, "symbol", ""), getattr(t.contract, "currency", ""))
+    ]
+
+
+def _print_working_fx_orders(working: list):
+    if not working:
+        return
+    print("\nFX orders still working at IB:")
+    for t in working:
+        print(
+            "  order %s: %s %s %s.%s, type %s, limit %s, status %s, filled %s"
+            % (
+                t.order.orderId,
+                t.order.action,
+                format(t.order.totalQuantity, "g"),
+                getattr(t.contract, "symbol", "?"),
+                getattr(t.contract, "currency", "?"),
+                getattr(t.order, "orderType", "?"),
+                getattr(t.order, "lmtPrice", "?"),
+                t.orderStatus.status,
+                t.orderStatus.filled,
+            )
+        )
 
 
 def resolve_fx_order(
