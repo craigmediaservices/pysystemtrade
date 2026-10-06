@@ -448,7 +448,8 @@ def fetch_treasurydirect_bills(
 ) -> list:
     """
     Bills auctioned in the last `days`: list of dict(cusip, maturity(date),
-    term, auction_yield_pct, issue_date). Raises on network failure.
+    term, auction_yield_pct, issue_date, auction_date), one per CUSIP from its
+    latest auction. Raises on network failure.
     """
     import requests
 
@@ -458,8 +459,20 @@ def fetch_treasurydirect_bills(
         timeout=timeout,
     )
     r.raise_for_status()
+    return parse_treasurydirect_bills(r.json())
+
+
+def parse_treasurydirect_bills(records: list) -> list:
+    """
+    TreasuryDirect auction records -> one dict per CUSIP (see
+    fetch_treasurydirect_bills). The same CUSIP is re-opened at several
+    auctions (e.g. a 26-week, then a 13-week, then a 6-week reopening of one
+    bill): keep the row with the LATEST auction date, whatever order the API
+    returns them in, so the yield floor uses the most recent auction yield.
+    """
     out = {}
-    for b in r.json():
+    latest = {}
+    for b in records:
         cusip = b.get("cusip", "")
         try:
             maturity = datetime.date.fromisoformat(str(b.get("maturityDate", ""))[:10])
@@ -469,13 +482,20 @@ def fetch_treasurydirect_bills(
             auction_yield = float(b.get("highInvestmentRate") or np.nan)
         except BaseException:
             auction_yield = np.nan
-        # the same CUSIP can be re-opened at several auctions: keep the latest
+        auction_date = str(b.get("auctionDate") or "")[:10]
+        issue_date = str(b.get("issueDate") or "")[:10]
+        # ISO dates sort as strings; a missing date sorts oldest
+        when = (auction_date, issue_date)
+        if cusip in latest and latest[cusip] >= when:
+            continue
+        latest[cusip] = when
         out[cusip] = dict(
             cusip=cusip,
             maturity=maturity,
             term=b.get("securityTerm", ""),
             auction_yield_pct=auction_yield,
-            issue_date=str(b.get("issueDate", ""))[:10],
+            issue_date=issue_date,
+            auction_date=auction_date,
         )
     return list(out.values())
 

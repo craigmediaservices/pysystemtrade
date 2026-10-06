@@ -529,3 +529,72 @@ def test_menu_offers_resend_first_and_as_default():
     )
     assert list(keys) == ["n", "s", "r", "w", "c"]
     assert itl.UNFILLED_MENU_DEFAULT == "n"
+
+
+# --- TreasuryDirect: one row per CUSIP, from its LATEST auction ---------------
+
+# Real TreasuryDirect records (TA_WS/securities/auctioned?type=Bill&days=400,
+# fetched 2026-10-06), trimmed to the fields the parser reads, in the order the
+# API returned them (newest first; original list positions 0, 1, 41, 63, 75).
+TD_RECORDS_NEWEST_FIRST = [
+    {
+        "cusip": "912797UZ8",
+        "auctionDate": "2026-10-06T00:00:00",
+        "issueDate": "2026-10-08T00:00:00",
+        "maturityDate": "2026-11-19T00:00:00",
+        "securityTerm": "6-Week",
+        "highInvestmentRate": "4.018000",
+    },
+    {
+        "cusip": "912797VS3",
+        "auctionDate": "2026-10-05T00:00:00",
+        "issueDate": "2026-10-08T00:00:00",
+        "maturityDate": "2027-01-07T00:00:00",
+        "securityTerm": "13-Week",
+        "highInvestmentRate": "4.149000",
+    },
+    {
+        "cusip": "912797UZ8",
+        "auctionDate": "2026-08-17T00:00:00",
+        "issueDate": "2026-08-20T00:00:00",
+        "maturityDate": "2026-11-19T00:00:00",
+        "securityTerm": "13-Week",
+        "highInvestmentRate": "3.802000",
+    },
+    {
+        "cusip": "912797VS3",
+        "auctionDate": "2026-07-06T00:00:00",
+        "issueDate": "2026-07-09T00:00:00",
+        "maturityDate": "2027-01-07T00:00:00",
+        "securityTerm": "26-Week",
+        "highInvestmentRate": "3.960000",
+    },
+    {
+        "cusip": "912797UZ8",
+        "auctionDate": "2026-05-18T00:00:00",
+        "issueDate": "2026-05-21T00:00:00",
+        "maturityDate": "2026-11-19T00:00:00",
+        "securityTerm": "26-Week",
+        "highInvestmentRate": "3.733000",
+    },
+]
+
+
+def _fetch_with_records(records):
+    from sysproduction import tbill_ladder
+
+    response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: records)
+    with mock.patch("requests.get", lambda *a, **k: response):
+        bills = tbill_ladder.fetch_treasurydirect_bills()
+    return {b["cusip"]: b for b in bills}
+
+
+def test_treasurydirect_keeps_the_latest_auction_per_cusip():
+    for records in (TD_RECORDS_NEWEST_FIRST, TD_RECORDS_NEWEST_FIRST[::-1]):
+        bills = _fetch_with_records(records)
+        assert sorted(bills) == ["912797UZ8", "912797VS3"]
+        uz8, vs3 = bills["912797UZ8"], bills["912797VS3"]
+        assert uz8["auction_yield_pct"] == 4.018 and uz8["term"] == "6-Week"
+        assert uz8["issue_date"] == "2026-10-08"
+        assert uz8["maturity"] == datetime.date(2026, 11, 19)
+        assert vs3["auction_yield_pct"] == 4.149 and vs3["term"] == "13-Week"
