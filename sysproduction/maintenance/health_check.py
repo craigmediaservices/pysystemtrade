@@ -173,6 +173,27 @@ def should_be_running(control, name: str, now: datetime.datetime) -> bool:
     return start <= now.time() < stop
 
 
+# processes that run a fixed number of times (max_executions in the control config)
+# and then exit cleanly well before their stop time: run_systems after the 10:05 run,
+# the order generator after 11:30. Gone after that is normal, not a crash.
+FINITE_RUN_PROCESSES = ["run_systems", "run_strategy_order_generator"]
+
+
+def finished_for_the_day(name: str, record, now: datetime.datetime) -> bool:
+    """
+    Pure, unit-tested. A finite-run process that started today, has a later end
+    time and was not closed by the crash monitor has done its runs for the day.
+    """
+    if name not in FINITE_RUN_PROCESSES:
+        return False
+    start, end = record.last_start_time, record.last_end_time
+    if not start or not end or start.date() != now.date():
+        return False
+    if getattr(record, "recently_crashed", False):
+        return False
+    return end >= start
+
+
 def connect_ib_once(data: dataBlob) -> tuple:
     """
     (connected, reason). ONE connection attempt, logged at WARNING on failure.
@@ -210,7 +231,9 @@ def health_check(verbose: bool = True) -> list:
                 control, name, now
             )
             flag = ""
-            if expected and not alive:
+            if expected and not alive and finished_for_the_day(name, c, now):
+                flag = "  (done for the day)"
+            elif expected and not alive:
                 flag = "  <-- NOT RUNNING (expected)"
                 problems.append("%s not running" % name)
             if c.status != "GO":

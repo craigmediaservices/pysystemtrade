@@ -250,3 +250,38 @@ def test_successful_connect_is_handed_to_the_blob():
         assert hc.connect_ib_once(blob) == (True, "")
     assert blob._ib_conn is fake
     ids.release_clientid.assert_not_called()
+
+
+# --- finite-run processes (2026-10-06): done for the day is not "not running" ---
+
+
+def _finite(started, ended, crashed=False):
+    return SimpleNamespace(
+        last_start_time=started, last_end_time=ended, recently_crashed=crashed
+    )
+
+
+def test_order_generator_after_its_last_run_is_done_for_the_day():
+    rec = _finite(_minutes_ago(30), _minutes_ago(5))
+    assert hc.finished_for_the_day("run_strategy_order_generator", rec, NOW)
+
+
+def test_still_marked_running_is_not_done():
+    rec = _finite(_minutes_ago(30), _minutes_ago(600))
+    assert not hc.finished_for_the_day("run_systems", rec, NOW)
+
+
+def test_closed_by_the_crash_monitor_is_not_done():
+    rec = _finite(_minutes_ago(30), _minutes_ago(5), crashed=True)
+    assert not hc.finished_for_the_day("run_systems", rec, NOW)
+
+
+def test_yesterdays_finish_is_not_done_today():
+    yesterday = NOW - datetime.timedelta(days=1)
+    rec = _finite(yesterday, yesterday + datetime.timedelta(minutes=30))
+    assert not hc.finished_for_the_day("run_systems", rec, NOW)
+
+
+def test_stack_handler_exiting_early_is_never_done():
+    rec = _finite(_minutes_ago(30), _minutes_ago(5))
+    assert not hc.finished_for_the_day("run_stack_handler", rec, NOW)
