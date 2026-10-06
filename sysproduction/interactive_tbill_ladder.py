@@ -208,7 +208,7 @@ def _cost_within_deployable(proposal: dict, state: dict) -> bool:
     cost, spare = proposal["cost"], state["spare"]
     try:
         ok = float(cost) <= float(spare)  # False on NaN
-    except BaseException:
+    except Exception:
         ok = False
     if not ok:
         print(

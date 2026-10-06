@@ -113,7 +113,7 @@ def _interactive_fx_sweep(data: dataBlob):
     # sweeping that currency again would double-trade
     try:
         working = working_fx_orders(data.ib_conn.ib)
-    except BaseException as e:
+    except Exception as e:
         if not dry_run:
             print(
                 "\nCould not list open orders at IB (%s) - cannot rule out a working "
