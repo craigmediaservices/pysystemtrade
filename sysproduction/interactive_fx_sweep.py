@@ -114,12 +114,16 @@ def _interactive_fx_sweep(data: dataBlob):
     try:
         working = working_fx_orders(data.ib_conn.ib)
     except BaseException as e:
-        print(
-            "\nCould not list open orders at IB (%s) - cannot rule out a working "
-            "FX conversion, so NOTHING will be placed. Check TWS and re-run." % e
-        )
         if not dry_run:
+            print(
+                "\nCould not list open orders at IB (%s) - cannot rule out a working "
+                "FX conversion, so NOTHING will be placed. Check TWS and re-run." % e
+            )
             return None
+        print(
+            "\nCould not list open FX orders at IB (%s): working-order skip check "
+            "unavailable in this dry run (a live run would place nothing)." % e
+        )
         working = []
     _print_working_fx_orders(working)
 

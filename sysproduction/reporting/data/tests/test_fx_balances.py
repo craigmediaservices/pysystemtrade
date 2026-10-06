@@ -267,9 +267,10 @@ def _fx_trade(order_id, symbol, currency, sec_type="CASH", done=False):
     )
 
 
-def _run_sweep(open_orders):
-    """Drive the live (not dry-run) sweep with every prompt answered yes and
-    record what it would place. open_orders: list, or an exception to raise."""
+def _run_sweep(open_orders, dry_run=False, printed=None):
+    """Drive the sweep (live unless dry_run) with every other prompt answered yes and
+    record what it would place (and what it prints, into `printed`).
+    open_orders: list, or an exception to raise."""
     from sysproduction import interactive_fx_sweep as fx
 
     # trade sizes from test_resolve_fx_order_direct_and_inverted above
@@ -309,11 +310,14 @@ def _run_sweep(open_orders):
         # dry run? no; LIMIT? yes; place? yes
         fx,
         "true_if_answer_is_yes",
-        lambda prompt, *a, **k: not prompt.startswith("Dry run"),
+        lambda prompt, *a, **k: dry_run if prompt.startswith("Dry run") else True,
     ), mock.patch.object(
         fx, "_place_fx_order", lambda **k: placed.append(k["ccy1"])
     ), mock.patch(
-        "builtins.print"
+        "builtins.print",
+        lambda *a, **k: printed.append(" ".join(str(x) for x in a))
+        if printed is not None
+        else None,
     ):
         fx._interactive_fx_sweep(data)
     return placed
@@ -334,3 +338,20 @@ def test_fx_sweep_skips_currencies_with_a_working_fx_order():
 
 def test_fx_sweep_places_nothing_if_open_orders_cannot_be_listed():
     assert _run_sweep(ConnectionError("not connected")) == []
+
+
+def test_fx_sweep_dry_run_says_the_skip_check_is_unavailable():
+    printed = []
+    placed = _run_sweep(ConnectionError("not connected"), True, printed)
+    assert placed == []
+    text = "\n".join(printed)
+    assert "skip check unavailable in this dry run" in text
+    assert "a live run would place nothing" in text
+    assert "NOTHING will be placed" not in text
+    assert "DRY RUN - not placed." in text
+
+
+def test_fx_sweep_live_message_when_open_orders_cannot_be_listed():
+    printed = []
+    assert _run_sweep(ConnectionError("not connected"), False, printed) == []
+    assert "NOTHING will be placed. Check TWS and re-run." in "\n".join(printed)
