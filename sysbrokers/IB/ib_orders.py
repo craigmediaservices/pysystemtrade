@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 
+from ib_async import util as ib_util
 from ib_async import (
     Trade as ibTrade,
     OrderStatus as ibOrderStatus,
@@ -36,6 +37,8 @@ from syslogging.logger import *
 
 OPEN_ORDER_CACHE_SECONDS = 1.0
 EXECUTIONS_CACHE_SECONDS = 30.0
+EXECUTIONS_FAILURE_CACHE_SECONDS = 60.0
+EXECUTIONS_REQUEST_TIMEOUT_SECONDS = 20.0
 
 
 def ib_status_means_done_not_filled(status: str) -> bool:
@@ -633,36 +636,60 @@ class ibExecutionStackData(brokerExecutionStackData):
 
     def get_keys_of_todays_executed_orders_from_broker(self):
         """
-        Identity keys of every order with an execution today, from a fresh
-        reqExecutions (subject to the connection's request timeout), cached
-        for EXECUTIONS_CACHE_SECONDS. None if IB did not give a usable answer.
-        Unlike reqAllOpenOrders, each reqExecutions has its own request id, so
-        a late reply cannot resolve a later request: a timeout is not fatal.
+        Identity keys of every order with an execution today (all clients),
+        from a fresh reqExecutions, or None if IB did not give a usable
+        answer (error, timeout, empty reply).
+
+        Both outcomes are cached: an answer for EXECUTIONS_CACHE_SECONDS, a
+        failure for EXECUTIONS_FAILURE_CACHE_SECONDS, so a stalled IB costs at
+        most one timeout a minute rather than one per unmatched order per
+        pass (2026-10-05: IB's executions request stalled). The request has
+        its own, shorter timeout (EXECUTIONS_REQUEST_TIMEOUT_SECONDS, or the
+        connection's if that is shorter). Unlike reqAllOpenOrders, each
+        reqExecutions has its own request id, so a late reply cannot resolve
+        a later request: a timeout is not fatal.
         """
         now = datetime.datetime.now()
         cached = getattr(self, "_executions_keys_cache", None)
         if cached is not None:
-            cache_time, keys = cached
-            if (now - cache_time).total_seconds() < EXECUTIONS_CACHE_SECONDS:
+            cache_time, keys, cache_seconds = cached
+            if (now - cache_time).total_seconds() < cache_seconds:
                 return keys
 
         try:
-            list_of_ib_fills = self.ib_client.ib.reqExecutions()
+            list_of_ib_fills = self._request_todays_executions()
         except Exception as e:
             self.log.warning(
                 "Could not get today's executions from IB (%s): not treating "
-                "any unmatched broker order as gone unfilled this time" % repr(e)
+                "any unmatched broker order as gone unfilled for %d seconds"
+                % (repr(e), EXECUTIONS_FAILURE_CACHE_SECONDS)
+            )
+            list_of_ib_fills = None
+
+        if not list_of_ib_fills:
+            # failed, nothing at all, or an errored request: can't tell which
+            self._executions_keys_cache = (
+                now,
+                None,
+                EXECUTIONS_FAILURE_CACHE_SECONDS,
             )
             return None
 
-        if not list_of_ib_fills:
-            # nothing at all, or an errored request: can't tell which
-            return None
-
         keys = order_keys_from_ib_fills(list_of_ib_fills)
-        self._executions_keys_cache = (now, keys)
+        self._executions_keys_cache = (now, keys, EXECUTIONS_CACHE_SECONDS)
 
         return keys
+
+    def _request_todays_executions(self) -> list:
+        # what ib.reqExecutions() does (util.run with the connection's
+        # RequestTimeout), with our shorter timeout
+        ib = self.ib_client.ib
+        timeout = EXECUTIONS_REQUEST_TIMEOUT_SECONDS
+        connection_timeout = getattr(ib, "RequestTimeout", 0)
+        if isinstance(connection_timeout, (int, float)) and connection_timeout > 0:
+            timeout = min(timeout, float(connection_timeout))
+
+        return ib_util.run(ib.reqExecutionsAsync(), timeout=timeout)
 
     def _any_key_open_at_broker(self, keys: set) -> bool:
         if len(keys) == 0:
