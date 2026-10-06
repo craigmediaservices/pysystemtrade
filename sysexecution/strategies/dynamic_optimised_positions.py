@@ -61,83 +61,116 @@ from systems.provided.dynamic_small_system_optimise.optimised_positions_stage im
 ARBITRARILY_LARGE_CONTRACT_LIMIT = 999999999
 
 # Freshness guard (2026-10-06). The order generator runs on its own timer
-# (03:30, 11:30) and does not know whether run_systems (02:05, 10:05, ~45-65
-# min) has finished writing raw optimal positions. run_systems rewrites EVERY
+# (03:30, 11:30) and does not know whether run_systems (02:05, 10:05) has
+# finished writing raw optimal positions. run_systems rewrites EVERY
 # instrument it has a raw position for on each run (system instruments plus
-# any with an existing position, the latter at zero), each with date=now, so
-# the oldest per-instrument date tells us whether the latest run completed.
-# On the current schedule a completed run's positions are < ~1.5h old when
-# the generator looks; the previous run's are >= ~8h old (480 min timer).
-# 6h sits between the two. Override with config element
+# any with an existing position, the latter at zero), each with date=now, and
+# all of them within about a minute. So:
+#   - newest minus oldest > max_spread_minutes: a run is part-way through
+#     its writes (or died part-way) -> BLOCK
+#   - newest older than max_age_hours: run_systems has not completed for a
+#     day or more -> BLOCK
+#   - no positions at all, or an undated one -> BLOCK
+#   - a uniform set from the previous run (newest older than
+#     WARN_AGE_HOURS_RAW_OPTIMAL_POSITIONS) -> trade, with a WARNING: these
+#     were the targets until now, and with max_executions 2 skipping would
+#     leave ~16h without trading.
+# Override with config elements max_spread_minutes_raw_optimal_positions and
 # max_age_hours_raw_optimal_positions.
-MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS = 6.0
+MAX_SPREAD_MINUTES_RAW_OPTIMAL_POSITIONS = 30.0
+MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS = 20.0
+WARN_AGE_HOURS_RAW_OPTIMAL_POSITIONS = 6.0
 
 
-def why_raw_optimal_positions_are_stale(
-    raw_optimal_position_data: dict, now: datetime.datetime, max_age_hours: float
-) -> str:
+def check_raw_optimal_positions(
+    raw_optimal_position_data: dict,
+    now: datetime.datetime,
+    max_age_hours: float = MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS,
+    max_spread_minutes: float = MAX_SPREAD_MINUTES_RAW_OPTIMAL_POSITIONS,
+) -> tuple:
     """
-    Pure. "" if every raw optimal position is younger than max_age_hours,
-    otherwise a reason not to trade on them. A mix of fresh and old dates
-    means run_systems is still writing (or died part-way).
+    Pure. Returns (block_reason, warning); block_reason "" means okay to
+    trade, warning "" means nothing worth saying.
     """
     if len(raw_optimal_position_data) == 0:
-        return "no raw optimal positions at all"
+        return "no raw optimal positions at all", ""
 
-    cutoff = now - datetime.timedelta(hours=max_age_hours)
     dates = {
         instrument_code: getattr(entry, "date", None)
         for instrument_code, entry in raw_optimal_position_data.items()
     }
-    stale = sorted(
-        instrument_code
-        for instrument_code, date in dates.items()
-        if date is None or date < cutoff
-    )
-    if len(stale) == 0:
-        return ""
+    undated = sorted(code for code, date in dates.items() if date is None)
+    if undated:
+        return "raw optimal positions without a date: %s" % ", ".join(undated), ""
 
-    dated = [date for date in dates.values() if date is not None]
-    oldest = str(min(dated)) if dated else "undated"
-    return (
-        "%d of %d raw optimal positions are older than %.1f hours (oldest %s; "
-        "e.g. %s): run_systems has not finished writing positions"
-        % (
-            len(stale),
-            len(dates),
-            max_age_hours,
-            oldest,
-            ", ".join(stale[:5]),
+    oldest = min(dates.values())
+    newest = max(dates.values())
+    spread_minutes = (newest - oldest).total_seconds() / 60.0
+    if spread_minutes > max_spread_minutes:
+        cutoff = newest - datetime.timedelta(minutes=max_spread_minutes)
+        behind = sorted(code for code, date in dates.items() if date < cutoff)
+        return (
+            "raw optimal positions are a mix of runs: %d of %d are more than "
+            "%.0f min older than the newest (%s, oldest %s; e.g. %s): "
+            "run_systems is still writing or died part-way"
+            % (
+                len(behind),
+                len(dates),
+                max_spread_minutes,
+                newest,
+                oldest,
+                ", ".join(behind[:5]),
+            ),
+            "",
         )
-    )
+
+    age_hours = (now - newest).total_seconds() / 3600.0
+    if age_hours > max_age_hours:
+        return (
+            "newest raw optimal position is %.1f hours old (%s), limit %.1f: "
+            "run_systems has not completed" % (age_hours, newest, max_age_hours),
+            "",
+        )
+
+    if age_hours > WARN_AGE_HOURS_RAW_OPTIMAL_POSITIONS:
+        return "", (
+            "raw optimal positions are %.1f hours old (%s): the latest "
+            "run_systems run has not written yet, using the previous run"
+            % (age_hours, newest)
+        )
+
+    return "", ""
 
 
 class orderGeneratorForDynamicPositions(orderGeneratorForStrategy):
-    @property
-    def max_age_hours_raw_optimal_positions(self) -> float:
-        return float(
-            self.data.config.get_element_or_default(
-                "max_age_hours_raw_optimal_positions",
-                MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS,
-            )
-        )
+    def _config_float(self, name: str, default: float) -> float:
+        return float(self.data.config.get_element_or_default(name, default))
 
     def get_required_orders(self) -> listOfOrders:
         strategy_name = self.strategy_name
 
         raw_optimal_position_data = self.get_raw_optimal_position_data()
-        stale_reason = why_raw_optimal_positions_are_stale(
+        block_reason, warning = check_raw_optimal_positions(
             raw_optimal_position_data,
             now=datetime.datetime.now(),
-            max_age_hours=self.max_age_hours_raw_optimal_positions,
+            max_age_hours=self._config_float(
+                "max_age_hours_raw_optimal_positions",
+                MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS,
+            ),
+            max_spread_minutes=self._config_float(
+                "max_spread_minutes_raw_optimal_positions",
+                MAX_SPREAD_MINUTES_RAW_OPTIMAL_POSITIONS,
+            ),
         )
-        if stale_reason:
-            # critical log will send email; trading on stale or half-written
-            # positions is worse than missing one pass
+        if block_reason:
+            # critical log will send email; trading on half-written or very
+            # old positions is worse than missing one pass
             self.log.critical(
-                "%s: NOT generating orders this run: %s" % (strategy_name, stale_reason)
+                "%s: NOT generating orders this run: %s" % (strategy_name, block_reason)
             )
             return listOfOrders([])
+        if warning:
+            self.log.warning("%s: %s" % (strategy_name, warning))
 
         optimised_positions_data = (
             self.calculate_write_and_return_optimised_positions_data(
