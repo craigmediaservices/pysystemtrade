@@ -115,6 +115,8 @@ def test_confirmed_gone_unfilled_order_is_completed_and_warned_once():
     assert order.fill_equals_desired_trade()
     assert order.fill_equals_zero()
     assert stacks.broker.is_completed(broker_id)
+    # the archive / reports still see what was originally asked for
+    assert order.algo_comment.endswith("original trade [1]")
     # checked once, then left alone: no more IB queries, no warning spam
     assert data_broker.asked_gone == [broker_id]
     handler._log.warning.assert_called_once()
@@ -184,3 +186,20 @@ def test_partially_filled_order_is_left_alone():
 
     assert not stacks.broker.is_completed(broker_id)
     assert data_broker.asked_gone == []
+
+
+def test_broker_reject_tag_survives_completion():
+    # Fix 1 counts rejects by the START of algo_comment; completing the
+    # order must not hide it
+    stacks = Stacks()
+    _, _, (broker_id,) = _family(stacks, [0])
+    order = stacks.broker.get_order_with_id_from_stack(broker_id)
+    order.algo_comment = "IB reject 201: No Trading Permission | log"
+    stacks.broker._change_order_on_stack(broker_id, order)
+    handler = _fills_handler(stacks)
+
+    _fills_pass(handler, _FakeDataBroker(gone=True), broker_id)
+
+    done = stacks.broker.get_order_with_id_from_stack(broker_id)
+    assert done.algo_comment.startswith("IB reject 201: No Trading Permission | ")
+    assert done.algo_comment.endswith("original trade [1]")

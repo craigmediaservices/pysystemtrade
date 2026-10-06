@@ -122,14 +122,14 @@ class stackHandlerForFills(stackHandlerForCompletions):
         self, broker_order_id: int, db_broker_order: brokerOrder
     ):
         """
-        Mark it complete with zero fill (trade set to fill, the same as
-        stop_further_trading_of_order does after an over-fill), so the fills
-        pass stops querying it and its parent can complete. Logged once:
+        Mark it complete with zero fill (trade set to fill, original trade
+        kept in algo_comment), so the fills pass stops querying it and its
+        parent can complete. Logged once:
         afterwards the order is complete and never looked at again.
         """
         log_attrs = {**db_broker_order.log_attributes(), "method": "temp"}
         try:
-            self.broker_stack.stop_further_trading_of_order(broker_order_id)
+            self.broker_stack.complete_unfilled_order_gone_from_broker(broker_order_id)
         except Exception as e:
             self.log.warning(
                 "Broker order %s is gone from the broker unfilled, but could not "
