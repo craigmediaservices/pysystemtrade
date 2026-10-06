@@ -20,6 +20,7 @@ import pytest
 from sysdata.mongodb.mongo_generic import mongoDataWithSingleKey
 from sysdata.mongodb.mongo_order_stack import mongoContractOrderStackData
 from sysexecution.orders.contract_orders import contractOrder
+from sysexecution.orders.instrument_orders import instrumentOrder, best_order_type
 from sysexecution.strategies.cancel_unsubmitted_orders import CANCEL_REF
 from sysexecution.tests.test_cancel_unsubmitted_orders import Stacks
 
@@ -77,17 +78,49 @@ def test_unclaimed_order_is_claimed():
     assert stored.reference_of_controlling_algo == HANDLER_REF
 
 
-def test_claiming_again_with_the_same_ref_is_still_fine():
-    # unchanged behaviour: the canceller re-claims its own marker after an
-    # earlier failed attempt
+def test_canceller_may_explicitly_reclaim_its_own_marker():
+    # the canceller re-claims its own leftover marker after an earlier
+    # attempt whose release failed; it has to ask for that explicitly
     stacks = Stacks()
     child_id = _child_id(stacks)
 
     stacks.contract.add_controlling_algo_ref(child_id, CANCEL_REF)
-    stacks.contract.add_controlling_algo_ref(child_id, CANCEL_REF)
+    stacks.contract.add_controlling_algo_ref(
+        child_id, CANCEL_REF, allow_reclaim_with_same_ref=True
+    )
 
     stored = stacks.contract.get_order_with_id_from_stack(child_id)
     assert stored.reference_of_controlling_algo == CANCEL_REF
+
+
+def test_canceller_retires_a_family_carrying_its_own_leftover_marker():
+    stacks = Stacks()
+    order_id = stacks.place_unsubmitted(-1)
+    child_id = stacks.contract_child_of(order_id).order_id
+    stacks.contract.add_controlling_algo_ref(child_id, CANCEL_REF)
+
+    assert stacks.canceller.cancel_orders_superseded_by(
+        instrumentOrder("strat", "INSTR", 0, order_type=best_order_type)
+    ) == [order_id]
+
+
+def test_same_ref_claim_without_permission_raises():
+    # the algo ref is the algo class path, shared by the stack handler and
+    # interactive_order_stack in another process
+    stacks = Stacks()
+    child_id = _child_id(stacks)
+    stacks.contract.add_controlling_algo_ref(child_id, HANDLER_REF)
+
+    with pytest.raises(Exception, match="Already controlled"):
+        stacks.contract.add_controlling_algo_ref(child_id, HANDLER_REF)
+
+
+def test_two_claimers_with_the_same_ref_only_one_wins():
+    stacks = Stacks()
+    child_id = _child_id(stacks)
+
+    with pytest.raises(Exception, match="Already controlled"):
+        _claim_with_stale_read(stacks.contract, child_id, HANDLER_REF, HANDLER_REF)
 
 
 def test_already_controlled_order_still_raises():
@@ -203,7 +236,27 @@ def test_mongo_claim_sends_a_conditional_update_of_one_field():
 
     assert collection.update_filters[-1] == {
         "order_id": 42,
-        "reference_of_controlling_algo": {"$in": [None, CANCEL_REF]},
+        "reference_of_controlling_algo": None,
         "locked": {"$ne": True},
     }
     assert collection.docs[0]["reference_of_controlling_algo"] == CANCEL_REF
+
+
+def test_mongo_two_claimers_with_the_same_ref_only_one_wins():
+    stack, collection = _mongo_contract_stack_with(_contract_order())
+
+    with pytest.raises(Exception, match="Already controlled"):
+        _claim_with_stale_read(stack, 42, HANDLER_REF, HANDLER_REF)
+
+    assert collection.update_filters[-1]["reference_of_controlling_algo"] is None
+
+
+def test_mongo_explicit_reclaim_allows_own_ref_only():
+    stack, collection = _mongo_contract_stack_with(_contract_order())
+    stack.add_controlling_algo_ref(42, CANCEL_REF)
+
+    stack.add_controlling_algo_ref(42, CANCEL_REF, allow_reclaim_with_same_ref=True)
+
+    assert collection.update_filters[-1]["reference_of_controlling_algo"] == {
+        "$in": [None, CANCEL_REF]
+    }
