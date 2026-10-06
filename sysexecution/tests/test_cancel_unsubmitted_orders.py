@@ -76,6 +76,16 @@ class memInstrumentStack(_memStack, instrumentOrderStackData):
 class memContractStack(_memStack, contractOrderStackData):
     order_class = contractOrder
 
+    def _claim_order_for_algo_if_unclaimed(self, order_id, control_algo_ref):
+        # same condition as the mongo filter; a dict in one thread is atomic
+        stored = self._store.get(order_id)
+        if stored is None or stored["locked"]:
+            return False
+        if stored["reference_of_controlling_algo"] not in (None, control_algo_ref):
+            return False
+        stored["reference_of_controlling_algo"] = control_algo_ref
+        return True
+
 
 class memBrokerStack(_memStack, brokerOrderStackData):
     order_class = brokerOrder
