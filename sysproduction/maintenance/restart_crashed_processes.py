@@ -56,6 +56,15 @@ STATE_FILE = work_path("restart_state.json")
 MAX_RESTARTS_PER_DAY = 2
 MIN_MINUTES_BETWEEN = 20
 
+# --- refusal alerts (2026-10-06): the cron runs every 10 minutes, and while a
+# process stays down with its budget spent every pass used to log CRITICAL
+# again (an email each time). Now each crashed run (process + its
+# last_start_time) gets the CRITICAL once; a later crash of a fresh start
+# (e.g. after a human restart) alerts again. A cooldown refusal is a WARNING
+# (not emailed), also once. Kept in its own file so the restart_state.json
+# format (and its loader) is unchanged.
+ALERT_STATE_FILE = work_path("restart_alerts.json")
+
 
 def load_restart_history() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -109,6 +118,54 @@ def record_restart(history: dict, name: str, now: datetime.datetime, operator: b
     if operator:
         return
     history.setdefault(name, []).append(now)
+
+
+def load_alert_state() -> dict:
+    """{process name: [alert keys already sent]}. Unreadable -> {} (re-alert)."""
+    if not os.path.exists(ALERT_STATE_FILE):
+        return {}
+    try:
+        with open(ALERT_STATE_FILE) as f:
+            raw = json.load(f)
+        return {name: list(keys) for name, keys in raw.items()}
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        print("   WARNING alert state unreadable (%s): alerts may repeat" % e)
+        return {}
+
+
+def save_alert_state(alerts: dict):
+    tmp = ALERT_STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(alerts, f, indent=1)
+    os.replace(tmp, ALERT_STATE_FILE)
+
+
+def budget_is_spent(stamps: list, now: datetime.datetime) -> bool:
+    """Pure. True for the daily budget, False for a mere cooldown refusal."""
+    return len([t for t in stamps if t.date() == now.date()]) >= MAX_RESTARTS_PER_DAY
+
+
+def refusal_alert(
+    alerts: dict,
+    name: str,
+    stage: str,
+    stamps: list,
+    run_started: datetime.datetime,
+    now: datetime.datetime,
+):
+    """
+    Pure, unit-tested. Returns "critical", "warning" or None (already sent)
+    and records the alert in `alerts`. One alert per process, stage, kind and
+    crashed run, and only today's keys are kept.
+    """
+    kind = "critical" if budget_is_spent(stamps, now) else "warning"
+    key = "%s|%s|%s|%s" % (now.date().isoformat(), stage, kind, run_started)
+    today = [k for k in alerts.get(name, []) if k.startswith(now.date().isoformat())]
+    if key in today:
+        alerts[name] = today
+        return None
+    alerts[name] = today + [key]
+    return kind
 
 
 def looks_crashed(record, now: datetime.datetime) -> bool:
@@ -170,6 +227,8 @@ def restart_crashed_processes(dry_run: bool = False, operator: bool = False) -> 
     now = datetime.datetime.now()
     restarted = []
     history = load_restart_history()
+    alerts = load_alert_state()
+    alerts_before = json.dumps(alerts, sort_keys=True)
     with dataBlob(log_name="Maintenance-Restart-Processes") as data:
         # an unattended restart is an event worth an email; a human doing it
         # by hand is not
@@ -192,9 +251,20 @@ def restart_crashed_processes(dry_run: bool = False, operator: bool = False) -> 
             if not allowed:
                 print("   %s - NOT killing: %s" % (msg, why))
                 if not dry_run:
-                    data.log.critical(
-                        "%s; restart budget spent (%s). Needs a human." % (msg, why)
+                    level = refusal_alert(
+                        alerts,
+                        name,
+                        "hung",
+                        history.get(name, []),
+                        c.last_start_time,
+                        now,
                     )
+                    if level == "critical":
+                        data.log.critical(
+                            "%s; restart budget spent (%s). Needs a human." % (msg, why)
+                        )
+                    elif level == "warning":
+                        data.log.warning("%s; not killing yet (%s)" % (msg, why))
                 continue
             print("   %s -> %s" % (msg, "would kill" if dry_run else "killing"))
             if not dry_run:
@@ -238,11 +308,24 @@ def restart_crashed_processes(dry_run: bool = False, operator: bool = False) -> 
             if not allowed:
                 print("   %s should be running - NOT restarting: %s" % (name, why))
                 if not dry_run:
-                    data.log.critical(
-                        "%s is down and the restart budget is spent (%s). "
-                        "It is probably failing for a real reason: needs a human."
-                        % (name, why)
+                    level = refusal_alert(
+                        alerts,
+                        name,
+                        "down",
+                        history.get(name, []),
+                        c.last_start_time,
+                        now,
                     )
+                    if level == "critical":
+                        data.log.critical(
+                            "%s is down and the restart budget is spent (%s). "
+                            "It is probably failing for a real reason: needs a human."
+                            % (name, why)
+                        )
+                    elif level == "warning":
+                        data.log.warning(
+                            "%s is down; not restarting yet (%s)" % (name, why)
+                        )
                 continue
             script = SCRIPT_FOR_PROCESS[name]
             print(
@@ -253,6 +336,9 @@ def restart_crashed_processes(dry_run: bool = False, operator: bool = False) -> 
                 restart_process(script)
                 restarted.append(name)
                 record_restart(history, name, now, operator)
+
+    if not dry_run and json.dumps(alerts, sort_keys=True) != alerts_before:
+        save_alert_state(alerts)
 
     if restarted:
         if not operator:
