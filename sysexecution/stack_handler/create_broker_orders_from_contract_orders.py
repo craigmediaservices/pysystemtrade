@@ -11,12 +11,19 @@ from sysexecution.algos.allocate_algo_to_order import (
 
 from sysexecution.orders.contract_orders import contractOrder, limit_order_type
 from sysexecution.trade_qty import tradeQuantity
-from sysexecution.orders.broker_orders import brokerOrder
+from sysexecution.orders.broker_orders import (
+    brokerOrder,
+    broker_order_was_rejected_by_broker,
+)
 from sysexecution.order_stacks.instrument_order_stack import instrumentOrder
 from sysexecution.order_stacks.broker_order_stack import orderWithControls
 from sysexecution.algos.algo import Algo
 from sysexecution.stack_handler.fills import stackHandlerForFills
 from sysproduction.data.controls import dataLocks
+
+# broker rejects (not our own algo timeouts) before we stop resending a
+# contract order
+MAX_BROKER_REJECTS_PER_CONTRACT_ORDER = 3
 
 
 def cap_each_leg_to_instrument_limit(
@@ -129,6 +136,11 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
             ## Do no further checks or resizing whatsoever!
             return original_contract_order
 
+        if self.contract_order_has_too_many_broker_rejects(original_contract_order):
+            # the broker keeps refusing this order (price limits, permissions
+            # ...): sending it again will not help, it needs a human
+            return missing_order
+
         if self.contract_order_has_unfilled_child_still_open_at_broker(
             original_contract_order
         ):
@@ -158,6 +170,63 @@ class stackHandlerCreateBrokerOrders(stackHandlerForFills):
         contract_order_to_trade = self.size_contract_order(original_contract_order)
 
         return contract_order_to_trade
+
+    def contract_order_has_too_many_broker_rejects(
+        self, contract_order: contractOrder
+    ) -> bool:
+        """
+        Stop a submit -> broker reject -> resubmit loop (2026-10-02: R1000,
+        37 broker orders cancelled by IB with 'Order price is outside price
+        limits' in six hours; a permission reject would loop all session).
+
+        Only children the broker itself refused or killed without a fill
+        count (see broker_order_was_rejected_by_broker). Our own algo
+        timeouts - 2-3 zero-fill cancels an hour is normal, which is why a
+        plain child cap was removed in e327abe0 - do not.
+
+        The instrument is NOT locked: locks are owned by the position-break
+        check, which clears any lock on an instrument without a break, so a
+        lock here would be silently undone on its next pass. Only this
+        contract order stops; a fresh order (e.g. tomorrow's) tries again.
+        """
+        if contract_order.no_children():
+            return False
+
+        broker_orders = self.broker_stack.get_list_of_orders_from_order_id_list(
+            contract_order.children
+        )
+        rejected = [
+            broker_order
+            for broker_order in broker_orders
+            if broker_order is not missing_order
+            and broker_order_was_rejected_by_broker(broker_order)
+        ]
+        if len(rejected) < MAX_BROKER_REJECTS_PER_CONTRACT_ORDER:
+            return False
+
+        self._log_reject_block_once(contract_order, rejected)
+
+        return True
+
+    def _log_reject_block_once(self, contract_order: contractOrder, rejected: list):
+        already_warned = getattr(self, "_warned_reject_blocks", set())
+        key = contract_order.order_id
+        msg = (
+            "Broker rejected %d broker orders for %s (latest: %s): not sending "
+            "it again; needs manual attention"
+            % (
+                len(rejected),
+                str(contract_order),
+                str(rejected[-1].algo_comment).split(" | ")[0],
+            )
+        )
+        log_attrs = {**contract_order.log_attributes(), "method": "temp"}
+        if key in already_warned:
+            self.log.debug(msg, **log_attrs)
+        else:
+            self.log.critical(msg, **log_attrs)
+            already_warned.add(key)
+            self._warned_reject_blocks = already_warned
 
     def contract_order_has_unfilled_child_still_open_at_broker(
         self, contract_order: contractOrder

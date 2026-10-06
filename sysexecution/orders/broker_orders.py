@@ -415,6 +415,27 @@ def create_new_broker_order_from_contract_order(
     return broker_order
 
 
+# The broker layer puts this at the start of algo_comment when the broker
+# itself refused or killed an order that never filled (as opposed to our own
+# algo timing out and cancelling it). Kept in algo_comment so it is persisted
+# by the normal fill path and archived with the order.
+BROKER_REJECT_COMMENT_PREFIX = "IB reject "
+
+
+def broker_reject_comment(error_code: int, reason: str) -> str:
+    return "%s%d: %s" % (BROKER_REJECT_COMMENT_PREFIX, int(error_code), reason)
+
+
+def broker_order_was_rejected_by_broker(broker_order: brokerOrder) -> bool:
+    comment = broker_order.algo_comment
+    if not isinstance(comment, str):
+        return False
+    if not comment.startswith(BROKER_REJECT_COMMENT_PREFIX):
+        return False
+
+    return broker_order.fill_equals_zero()
+
+
 ## Not very pretty but only used for diagnostic TCA
 class brokerOrderWithParentInformation(brokerOrder):
     @classmethod
