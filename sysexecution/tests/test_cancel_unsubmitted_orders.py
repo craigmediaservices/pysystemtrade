@@ -76,6 +76,19 @@ class memInstrumentStack(_memStack, instrumentOrderStackData):
 class memContractStack(_memStack, contractOrderStackData):
     order_class = contractOrder
 
+    def _claim_order_for_algo_if_unclaimed(
+        self, order_id, control_algo_ref, allow_same_ref=False
+    ):
+        # same condition as the mongo filter; a dict in one thread is atomic
+        stored = self._store.get(order_id)
+        if stored is None or stored["locked"]:
+            return False
+        claimable = (None, control_algo_ref) if allow_same_ref else (None,)
+        if stored["reference_of_controlling_algo"] not in claimable:
+            return False
+        stored["reference_of_controlling_algo"] = control_algo_ref
+        return True
+
 
 class memBrokerStack(_memStack, brokerOrderStackData):
     order_class = brokerOrder
@@ -268,9 +281,9 @@ def test_algo_grabbing_the_child_between_read_and_claim_falls_back():
     child = stacks.contract_child_of(order_id)
     real_add = stacks.contract.add_controlling_algo_ref
 
-    def handler_gets_there_first(contract_order_id, ref):
+    def handler_gets_there_first(contract_order_id, ref, **kwargs):
         real_add(contract_order_id, "algo_original_best")
-        return real_add(contract_order_id, ref)  # raises: already controlled
+        return real_add(contract_order_id, ref, **kwargs)  # raises: controlled
 
     with mock.patch.object(
         stacks.contract,

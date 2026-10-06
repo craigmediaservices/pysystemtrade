@@ -1,8 +1,9 @@
 import datetime
+from copy import copy
 
 from sysexecution.orders.named_order_objects import missing_order
-from sysexecution.order_stacks.order_stack import orderStackData
-from sysexecution.orders.broker_orders import brokerOrder
+from sysexecution.order_stacks.order_stack import orderStackData, missingOrder
+from sysexecution.orders.broker_orders import brokerOrder, ZERO_FILL_COMPLETION_NOTE
 
 from sysexecution.tick_data import tickerObject
 
@@ -20,6 +21,33 @@ class brokerOrderStackData(orderStackData):
         )
 
         self._change_order_on_stack(broker_order_id, db_broker_order)
+
+    def complete_unfilled_order_gone_from_broker(self, order_id: int):
+        """
+        Mark an unfilled broker order that the broker confirms is gone as
+        complete with zero fill. Completion means fill == trade (there is no
+        separate completed flag; allow_zero_completions is only for the
+        end-of-day sweep), so trade is set to the (zero) fill, as
+        stop_further_trading_of_order does; the original trade is kept at
+        the END of algo_comment for the archive and reports (the start may
+        carry a broker reject tag).
+        """
+        existing_order = self.get_order_with_id_from_stack(order_id)
+        if existing_order is missing_order:
+            error_msg = "Can't complete non existent order %d" % order_id
+            self.log.warning(error_msg)
+            raise missingOrder(error_msg)
+
+        note = "%s completed with zero fill, original trade %s" % (
+            ZERO_FILL_COMPLETION_NOTE,
+            str(list(existing_order.trade)),
+        )
+        comment = existing_order.algo_comment
+        new_order = copy(existing_order)
+        new_order.algo_comment = note if not comment else "%s | %s" % (comment, note)
+        new_order.change_trade_qty_to_filled_qty()
+
+        self._change_order_on_stack(order_id, new_order)
 
     def find_order_with_broker_tempid(self, broker_tempid: str):
         list_of_order_ids = self.get_list_of_order_ids(exclude_inactive_orders=False)

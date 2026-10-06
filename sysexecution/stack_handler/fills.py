@@ -62,6 +62,14 @@ class stackHandlerForFills(stackHandlerForCompletions):
         )
 
         if matched_broker_order is missing_order:
+            if self.unfilled_broker_order_is_gone_from_broker(
+                db_broker_order, data_broker
+            ):
+                self.complete_unfilled_broker_order_gone_from_broker(
+                    broker_order_id, db_broker_order
+                )
+                return None
+
             self.log.warning(
                 "Order in database %s does not match any broker orders: can't fill"
                 % db_broker_order,
@@ -72,6 +80,70 @@ class stackHandlerForFills(stackHandlerForCompletions):
 
         self.apply_broker_order_fills_to_database(
             broker_order_id=broker_order_id, broker_order=matched_broker_order
+        )
+
+    def unfilled_broker_order_is_gone_from_broker(
+        self, db_broker_order: brokerOrder, data_broker: dataBroker
+    ) -> bool:
+        """
+        A zero-fill broker order IB no longer knows about (typically after a
+        restart, or an end-of-day clean-up that didn't run) is otherwise
+        re-queried every pass forever and blocks its parent from completing
+        (2026-10-02..05: 36 R1000 orders, ~486k 'does not match' warnings).
+
+        Only act when nothing can still fill it or record a fill for it:
+        - nothing filled in our database, not a manual fill;
+        - its contract order is known and NOT controlled by an algo: an algo
+          (here or in another process, e.g. interactive_order_stack) applies
+          its own fills before releasing control, and a non-blocking algo
+          never releases it;
+        - the broker confirms it is gone: not in a fresh open-order list and
+          no execution reported for it (never ib_async's local status).
+        """
+        if not db_broker_order.fill_equals_zero():
+            return False
+        if db_broker_order.manual_fill:
+            return False
+
+        contract_order_id = db_broker_order.parent
+        if contract_order_id is no_parent:
+            return False
+        contract_order = self.contract_stack.get_order_with_id_from_stack(
+            contract_order_id
+        )
+        if contract_order is missing_order:
+            return False
+        if contract_order.is_order_controlled_by_algo():
+            return False
+
+        return data_broker.check_unfilled_order_is_gone_from_broker(db_broker_order)
+
+    def complete_unfilled_broker_order_gone_from_broker(
+        self, broker_order_id: int, db_broker_order: brokerOrder
+    ):
+        """
+        Mark it complete with zero fill (trade set to fill, original trade
+        kept in algo_comment), so the fills pass stops querying it and its
+        parent can complete. Logged once:
+        afterwards the order is complete and never looked at again.
+        """
+        log_attrs = {**db_broker_order.log_attributes(), "method": "temp"}
+        try:
+            self.broker_stack.complete_unfilled_order_gone_from_broker(broker_order_id)
+        except Exception as e:
+            self.log.warning(
+                "Broker order %s is gone from the broker unfilled, but could not "
+                "be marked complete: %s" % (str(db_broker_order), str(e)),
+                **log_attrs,
+            )
+            return None
+
+        self.log.warning(
+            "Broker order %s never filled and is gone from the broker (not in "
+            "its open-order list, no executions): marked complete with zero "
+            "fill (original trade %s)"
+            % (str(db_broker_order), str(db_broker_order.trade)),
+            **log_attrs,
         )
 
     def apply_broker_order_fills_to_database(

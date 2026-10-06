@@ -10,8 +10,27 @@ class contractOrderStackData(orderStackData):
     def _name(self):
         return "Contract order stack"
 
-    def add_controlling_algo_ref(self, order_id: int, control_algo_ref: str):
+    def add_controlling_algo_ref(
+        self,
+        order_id: int,
+        control_algo_ref: str,
+        allow_reclaim_with_same_ref: bool = False,
+    ):
         """
+        Claim the order for an algo (or for the order generator's canceller).
+
+        The claim is a compare-and-set in the store, not read-check-overwrite:
+        the stack handler and the order generator can try to claim the same
+        contract order within milliseconds, and with a plain overwrite both
+        would 'succeed' (a possible double trade). Losing the race raises,
+        exactly as finding the order already controlled does.
+
+        An order already controlled by the SAME ref is not claimable either:
+        the ref is the algo class path, shared by the stack handler and
+        interactive_order_stack in another process, so both would 'win'.
+        Only a caller that knows the ref is uniquely its own and must be able
+        to take back its own leftover marker (the order generator's
+        canceller, CANCEL_REF) passes allow_reclaim_with_same_ref=True.
 
         :param order_id: int
         :param control_algo_ref: str or None
@@ -29,9 +48,37 @@ class contractOrderStackData(orderStackData):
             raise missingOrder(error_msg)
 
         try:
+            # same checks as before, on what we read (fast, clear message)...
+            # (read the current ref first: copy() is shallow, so the order
+            # check below writes into existing_order's order_info too)
+            already_ours = (
+                existing_order.reference_of_controlling_algo == control_algo_ref
+            )
+            if already_ours and not allow_reclaim_with_same_ref:
+                raise Exception("Already controlled by %s" % control_algo_ref)
             modified_order = copy(existing_order)
             modified_order.add_controlling_algo_ref(control_algo_ref)
-            self._change_order_on_stack(order_id, modified_order)
+            if existing_order.is_order_locked():
+                raise Exception("Can't change locked order %s" % str(existing_order))
+
+            # ... then the claim itself, which only succeeds if the order is
+            # still unclaimed (or, if allowed, already ours) and unlocked in
+            # the store
+            claimed = self._claim_order_for_algo_if_unclaimed(
+                order_id,
+                control_algo_ref,
+                allow_same_ref=allow_reclaim_with_same_ref,
+            )
+            if not claimed:
+                current_order = self.get_order_with_id_from_stack(order_id)
+                current_ref = (
+                    "unknown (order gone)"
+                    if current_order is missing_order
+                    else current_order.reference_of_controlling_algo
+                )
+                raise Exception(
+                    "Already controlled by %s (claimed concurrently)" % current_ref
+                )
         except Exception as e:
             error_msg = "%s couldn't add controlling algo %s to order %d" % (
                 str(e),
@@ -74,6 +121,18 @@ class contractOrderStackData(orderStackData):
                 method="temp",
             )
             raise Exception(error_msg)
+
+    def _claim_order_for_algo_if_unclaimed(
+        self, order_id: int, control_algo_ref: str, allow_same_ref: bool = False
+    ) -> bool:
+        """
+        MUST be atomic in the data implementation: set the order's
+        reference_of_controlling_algo to control_algo_ref only if, in the
+        store, the order exists, is not locked, and is uncontrolled (or, only
+        if allow_same_ref, already controlled by control_algo_ref). Change
+        nothing else. Return True if the condition held, else False.
+        """
+        raise NotImplementedError
 
     def get_order_with_id_from_stack(self, order_id: int) -> contractOrder:
         # probably will be overridden in data implementation

@@ -135,6 +135,8 @@ def interactive_tbill_ladder(dry_run: bool = False):
         proposal = build_proposal(
             face, chosen, limit_price, limit_reason, target_month, target_reason
         )
+        if not _cost_within_deployable(proposal, state):
+            return
         ib = data.ib_conn.ib
         contract = _show_proposal_and_preview(ib, proposal, state)
         if contract is None:
@@ -164,10 +166,13 @@ def _no_working_bill_orders(ib, dry_run: bool) -> bool:
             if t.contract.secType in ("BILL", "BOND") and not t.isDone()
         ]
     except BaseException as e:
+        # fail closed: without the open-order list we cannot rule out a
+        # working bill order, and proposing on top of one would double-buy
         print(
-            "Could not list open orders (%s) - check TWS for working bill orders." % e
+            "Could not list open orders (%s) - STOPPING. Check TWS for working "
+            "bill orders and re-run." % e
         )
-        return True
+        return False
     if not working:
         return True
     print("")
@@ -192,6 +197,25 @@ def _no_working_bill_orders(ib, dry_run: bool) -> bool:
     if dry_run:
         return True
     return true_if_answer_is_yes("Propose another order anyway? y/n: ")
+
+
+def _cost_within_deployable(proposal: dict, state: dict) -> bool:
+    """
+    The face prompt accepts any number: refuse an order whose cost is more
+    than the deployable cash (cash net of negative balances, minus the buffer),
+    e.g. a typo with an extra zero. Fails closed on a missing number.
+    """
+    cost, spare = proposal["cost"], state["spare"]
+    try:
+        ok = float(cost) <= float(spare)  # False on NaN
+    except Exception:
+        ok = False
+    if not ok:
+        print(
+            "Cost ~%s is more than the deployable cash %s - nothing placed. "
+            "Enter a smaller face value." % (_fmt_ib_value(cost), _fmt_ib_value(spare))
+        )
+    return ok
 
 
 def _limit_for(chosen: pd.Series, purchase_settings: dict):
@@ -284,6 +308,15 @@ def _passes_guards(state: dict) -> bool:
     if not state["collateral_ok"]:
         print("Collateral check failed - stopping (see report).")
         return False
+    if state.get("collateral_unverified", True):
+        print(
+            "WARNING: could not read margin tags from IB, so the collateral check "
+            "did not run - it is unknown whether IB fully credits bills toward "
+            "margin."
+        )
+        if not true_if_answer_is_yes("Continue without the collateral check? y/n: "):
+            print("Stopping.")
+            return False
     rounding = state["settings"]["rounding"]
     floor = max(rounding, float(state["settings"].get("min_purchase", rounding)))
     face = purchase_face(state["spare"], rounding)

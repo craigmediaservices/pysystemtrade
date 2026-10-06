@@ -1,4 +1,5 @@
 import time
+import traceback
 from copy import copy
 import datetime
 from sysdata.data_blob import dataBlob
@@ -10,14 +11,71 @@ from syscore.dateutils import date_as_short_pattern_or_question_if_missing
 from syscontrol.list_running_pids import describe_trading_server_login_data
 
 
+SECONDS_BETWEEN_PASSES = 300
+SECONDS_AFTER_FAILED_PASS = 60
+# CRITICAL (emailed) on the Nth consecutive failure, then every Mth after
+FAILURES_BEFORE_CRITICAL = 5
+FAILURES_BETWEEN_REPEAT_CRITICALS = 60
+
+
 def monitor():
     with dataBlob(log_name="system-monitor") as data:
         process_observatory = processMonitor(data)
-        while 2 == 2:
-            check_if_pid_running_and_if_not_finish(process_observatory)
-            process_observatory.update_all_status_with_process_control()
-            generate_html(process_observatory)
-            time.sleep(300)
+        consecutive_failures = 0
+        while True:
+            consecutive_failures = monitor_pass(
+                process_observatory, data.log, consecutive_failures
+            )
+            time.sleep(
+                SECONDS_AFTER_FAILED_PASS
+                if consecutive_failures
+                else SECONDS_BETWEEN_PASSES
+            )
+
+
+def _log_or_print(log_method, msg: str):
+    # the logger itself (log server, SMTP) can be what is failing; that must
+    # not kill the monitor either
+    try:
+        log_method(msg)
+    except Exception as e:
+        print("%s [logging failed: %r]" % (msg, e), flush=True)
+
+
+def monitor_pass(process_observatory, log, consecutive_failures: int) -> int:
+    """
+    One pass of the monitor loop; returns the new consecutive failure count.
+    Until 2026-10-06 any exception here (a Mongo blip, a file error) ended
+    the monitor until the next reboot. Every failure is logged with its
+    traceback; only a run of them is escalated to CRITICAL.
+    """
+    try:
+        check_if_pid_running_and_if_not_finish(process_observatory)
+        process_observatory.update_all_status_with_process_control()
+        generate_html(process_observatory)
+    except Exception:
+        failures = consecutive_failures + 1
+        msg = "System monitor pass failed (%d in a row), will retry:\n%s" % (
+            failures,
+            traceback.format_exc(),
+        )
+        if failures == FAILURES_BEFORE_CRITICAL or (
+            failures > FAILURES_BEFORE_CRITICAL
+            and (failures - FAILURES_BEFORE_CRITICAL)
+            % FAILURES_BETWEEN_REPEAT_CRITICALS
+            == 0
+        ):
+            _log_or_print(log.critical, msg)
+        else:
+            _log_or_print(log.error, msg)
+        return failures
+
+    if consecutive_failures:
+        _log_or_print(
+            log.warning,
+            "System monitor recovered after %d failed passes" % consecutive_failures,
+        )
+    return 0
 
 
 UNKNOWN_STATUS = "Unknown"

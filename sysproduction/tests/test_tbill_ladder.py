@@ -529,3 +529,184 @@ def test_menu_offers_resend_first_and_as_default():
     )
     assert list(keys) == ["n", "s", "r", "w", "c"]
     assert itl.UNFILLED_MENU_DEFAULT == "n"
+
+
+# --- TreasuryDirect: one row per CUSIP, from its LATEST auction ---------------
+
+# Real TreasuryDirect records (TA_WS/securities/auctioned?type=Bill&days=400,
+# fetched 2026-10-06), trimmed to the fields the parser reads, in the order the
+# API returned them (newest first; original list positions 0, 1, 41, 63, 75).
+TD_RECORDS_NEWEST_FIRST = [
+    {
+        "cusip": "912797UZ8",
+        "auctionDate": "2026-10-06T00:00:00",
+        "issueDate": "2026-10-08T00:00:00",
+        "maturityDate": "2026-11-19T00:00:00",
+        "securityTerm": "6-Week",
+        "highInvestmentRate": "4.018000",
+    },
+    {
+        "cusip": "912797VS3",
+        "auctionDate": "2026-10-05T00:00:00",
+        "issueDate": "2026-10-08T00:00:00",
+        "maturityDate": "2027-01-07T00:00:00",
+        "securityTerm": "13-Week",
+        "highInvestmentRate": "4.149000",
+    },
+    {
+        "cusip": "912797UZ8",
+        "auctionDate": "2026-08-17T00:00:00",
+        "issueDate": "2026-08-20T00:00:00",
+        "maturityDate": "2026-11-19T00:00:00",
+        "securityTerm": "13-Week",
+        "highInvestmentRate": "3.802000",
+    },
+    {
+        "cusip": "912797VS3",
+        "auctionDate": "2026-07-06T00:00:00",
+        "issueDate": "2026-07-09T00:00:00",
+        "maturityDate": "2027-01-07T00:00:00",
+        "securityTerm": "26-Week",
+        "highInvestmentRate": "3.960000",
+    },
+    {
+        "cusip": "912797UZ8",
+        "auctionDate": "2026-05-18T00:00:00",
+        "issueDate": "2026-05-21T00:00:00",
+        "maturityDate": "2026-11-19T00:00:00",
+        "securityTerm": "26-Week",
+        "highInvestmentRate": "3.733000",
+    },
+]
+
+
+def _fetch_with_records(records):
+    from sysproduction import tbill_ladder
+
+    response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: records)
+    with mock.patch("requests.get", lambda *a, **k: response):
+        bills = tbill_ladder.fetch_treasurydirect_bills()
+    return {b["cusip"]: b for b in bills}
+
+
+def test_treasurydirect_keeps_the_latest_auction_per_cusip():
+    for records in (TD_RECORDS_NEWEST_FIRST, TD_RECORDS_NEWEST_FIRST[::-1]):
+        bills = _fetch_with_records(records)
+        assert sorted(bills) == ["912797UZ8", "912797VS3"]
+        uz8, vs3 = bills["912797UZ8"], bills["912797VS3"]
+        assert uz8["auction_yield_pct"] == 4.018 and uz8["term"] == "6-Week"
+        assert uz8["issue_date"] == "2026-10-08"
+        assert uz8["maturity"] == datetime.date(2026, 11, 19)
+        assert vs3["auction_yield_pct"] == 4.149 and vs3["term"] == "13-Week"
+
+
+# --- fail-closed guards -------------------------------------------------------
+
+
+def test_cannot_list_open_orders_stops_the_tool():
+    def broken():
+        raise ConnectionError("not connected")
+
+    ib = SimpleNamespace(reqAllOpenOrders=broken)
+    with mock.patch("builtins.print"):
+        assert not itl._no_working_bill_orders(ib, dry_run=False)
+
+
+def _guard_state(**overrides):
+    state = dict(
+        balances_ok=True,
+        base_cash=492311.0,
+        collateral_ok=True,
+        collateral_unverified=False,
+        spare=272311.0,
+        settings=dict(rounding=10000.0, min_purchase=10000.0),
+    )
+    state.update(overrides)
+    return state
+
+
+def _passes_guards(state, answer):
+    asked = []
+
+    def yes(prompt, *a, **k):
+        asked.append(prompt)
+        return answer
+
+    with mock.patch.object(itl, "true_if_answer_is_yes", yes), mock.patch(
+        "builtins.print"
+    ):
+        return itl._passes_guards(state), asked
+
+
+def test_verified_collateral_passes_without_asking():
+    ok, asked = _passes_guards(_guard_state(), answer=False)
+    assert ok and not asked
+
+
+def test_unverified_collateral_needs_an_explicit_yes():
+    # margin tags unreadable: collateral_ok is True only because the check
+    # could not run - that must not pass silently
+    state = _guard_state(collateral_unverified=True)
+    ok, asked = _passes_guards(state, answer=False)
+    assert not ok and len(asked) == 1
+    ok, asked = _passes_guards(state, answer=True)
+    assert ok and len(asked) == 1
+
+
+def _run_tool_with_face(face_answer):
+    """Drive interactive_tbill_ladder up to the IB preview with a typed face;
+    returns the proposals that reached the preview."""
+    import contextlib
+
+    cands = _two_bills(4.10, 0.5, 4.16, 1.0)
+    state = dict(
+        _guard_state(),
+        gaps=["2027-02"],
+        today=ASOF,
+        settings=dict(ladder_months=6, rounding=10000.0, min_purchase=10000.0),
+        bond_df=pd.DataFrame(),
+        base_cash=492311.0,
+        buffer=220000.0,
+        account_id="U0",
+    )
+    previewed = []
+
+    @contextlib.contextmanager
+    def fake_blob(**k):
+        yield SimpleNamespace(ib_conn=SimpleNamespace(ib=object()))
+
+    with mock.patch.object(itl, "dataBlob", fake_blob), mock.patch.object(
+        itl, "compute_ladder_state", lambda d: state
+    ), mock.patch.object(itl, "_print_state", lambda s: None), mock.patch.object(
+        itl, "_passes_guards", lambda s: True
+    ), mock.patch.object(
+        itl, "_no_working_bill_orders", lambda ib, dry_run: True
+    ), mock.patch.object(
+        itl, "get_purchase_settings", lambda d: dict(month_slack_days=15)
+    ), mock.patch.object(
+        itl, "_find_candidates", lambda *a: cands
+    ), mock.patch.object(
+        itl, "_let_user_pick", lambda c, i, r: 1
+    ), mock.patch.object(
+        itl, "_limit_for", lambda row, s: (98.40, "IB ask + pad")
+    ), mock.patch.object(
+        itl, "get_input_from_user_and_convert_to_type", lambda *a, **k: face_answer
+    ), mock.patch.object(
+        itl,
+        "_show_proposal_and_preview",
+        lambda ib, p, s: previewed.append(p) or None,
+    ), mock.patch(
+        "builtins.print"
+    ):
+        itl.interactive_tbill_ladder(dry_run=True)
+    return previewed
+
+
+def test_face_within_deployable_cash_reaches_the_preview():
+    previewed = _run_tool_with_face(270000.0)
+    assert len(previewed) == 1 and previewed[0]["units"] == 270
+
+
+def test_face_costing_more_than_deployable_cash_is_refused():
+    # 2,700,000 typed for 270,000: costs ~2.66M against 272,311 deployable
+    assert _run_tool_with_face(2700000.0) == []

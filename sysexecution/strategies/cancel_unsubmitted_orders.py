@@ -214,8 +214,13 @@ class unsubmittedOrderCanceller(object):
         try:
             for instrument_order in families:
                 for contract_order in self._contract_children(instrument_order):
+                    # CANCEL_REF is only ever used by this canceller, so
+                    # taking back our own leftover marker (from an earlier
+                    # attempt whose release failed) is safe
                     self.contract_stack.add_controlling_algo_ref(
-                        contract_order.order_id, CANCEL_REF
+                        contract_order.order_id,
+                        CANCEL_REF,
+                        allow_reclaim_with_same_ref=True,
                     )
                     claimed.append(contract_order.order_id)
 

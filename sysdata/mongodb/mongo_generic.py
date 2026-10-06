@@ -156,6 +156,30 @@ class mongoDataWithSingleKey(object):
         cleaned_data_dict[key_name] = key
         self.collection.insert_one(cleaned_data_dict)
 
+    def update_fields_if_document_matches(
+        self, key, required_values: dict, new_values: dict, clean_ints=True
+    ) -> bool:
+        """
+        Atomic compare-and-set: $set new_values on the document with this key
+        only if it also matches required_values (a Mongo query on the same
+        document). Other fields are left alone.
+
+        Returns True if the document matched (so it now holds new_values),
+        False if it doesn't exist or no longer matches. Uses matched_count
+        rather than modified_count so that setting a value the document
+        already holds counts as success.
+        """
+        if clean_ints:
+            cleaned_new_values = mongo_clean_ints(new_values)
+        else:
+            cleaned_new_values = copy(new_values)
+
+        query = dict(required_values)
+        query[self.key_name] = key
+        result = self.collection.update_one(query, {"$set": cleaned_new_values})
+
+        return result.matched_count == 1
+
 
 class mongoDataWithMultipleKeys(object):
     """

@@ -53,6 +53,11 @@ class brokerExecutionStackData(brokerOrderStackData):
     def check_order_is_still_open_at_broker(self, broker_order: brokerOrder) -> bool:
         raise NotImplementedError
 
+    def check_unfilled_order_is_gone_from_broker(
+        self, broker_order: brokerOrder
+    ) -> bool:
+        raise NotImplementedError
+
     def modify_limit_price_given_control_object(
         self, broker_order_with_controls: orderWithControls, new_limit_price: float
     ) -> orderWithControls:

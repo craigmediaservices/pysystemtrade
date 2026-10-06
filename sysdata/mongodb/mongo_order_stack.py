@@ -7,7 +7,7 @@ from sysexecution.orders.named_order_objects import missing_order
 from sysexecution.orders.base_orders import Order
 from sysexecution.orders.instrument_orders import instrumentOrder
 from sysexecution.order_stacks.instrument_order_stack import instrumentOrderStackData
-from sysexecution.orders.contract_orders import contractOrder
+from sysexecution.orders.contract_orders import contractOrder, NO_CONTROLLING_ALGO
 from sysexecution.order_stacks.contract_order_stack import contractOrderStackData
 from sysexecution.orders.broker_orders import brokerOrder
 from sysexecution.order_stacks.broker_order_stack import brokerOrderStackData
@@ -131,6 +131,24 @@ class mongoContractOrderStackData(mongoOrderStackData, contractOrderStackData):
 
     def _order_class(self):
         return contractOrder
+
+    def _claim_order_for_algo_if_unclaimed(
+        self, order_id: int, control_algo_ref: str, allow_same_ref: bool = False
+    ) -> bool:
+        # one update_one with the condition in the filter: atomic in Mongo.
+        # A None condition matches a stored null or a missing field.
+        if allow_same_ref:
+            claimable = {"$in": [NO_CONTROLLING_ALGO, control_algo_ref]}
+        else:
+            claimable = NO_CONTROLLING_ALGO
+        return self.mongo_data.update_fields_if_document_matches(
+            order_id,
+            required_values={
+                "reference_of_controlling_algo": claimable,
+                "locked": {"$ne": True},
+            },
+            new_values={"reference_of_controlling_algo": control_algo_ref},
+        )
 
 
 class mongoBrokerOrderStackData(mongoOrderStackData, brokerOrderStackData):

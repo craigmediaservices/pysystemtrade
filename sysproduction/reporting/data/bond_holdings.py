@@ -445,6 +445,20 @@ def collateral_check(
     )
 
 
+def collateral_flags(check: dict) -> dict:
+    """
+    collateral_ok: False only when the check ran and found a haircut.
+    collateral_unverified: True when the check could not run (margin tags
+    unreadable). Unknown is not a pass: callers that act on collateral_ok must
+    surface collateral_unverified (the purchase tool asks before going on).
+    """
+    usable = bool(check.get("usable", False))
+    return dict(
+        collateral_ok=(not usable) or bool(check.get("fully_counted", False)),
+        collateral_unverified=not usable,
+    )
+
+
 def _add_months(d: datetime.date, n: int) -> datetime.date:
     month = d.month - 1 + n
     year = d.year + month // 12
@@ -622,7 +636,8 @@ def compute_ladder_state(data: dataBlob) -> dict:
     Keys: settings, today, base_currency, account_id, bond_df, etf_df, gaps,
     ladder_months, balances_ok, base_cash, negative_ccys, margin, nlv, maint,
     init, excess, total_cash, bills_mv, etf_mv, daily_sd, buffer, buffer_text,
-    spare, check (collateral dict), collateral_ok, rung, action.
+    spare, check (collateral dict), collateral_ok, collateral_unverified, rung,
+    action.
 
     A broker hiccup reading balances sets balances_ok=False and an 'unknown'
     action rather than raising.
@@ -669,6 +684,7 @@ def compute_ladder_state(data: dataBlob) -> dict:
         deploy_cash=np.nan,
         check=dict(haircut=np.nan, fully_counted=False, usable=False),
         collateral_ok=False,
+        collateral_unverified=True,
         rung=np.nan,
         action="ACTION: unknown - broker cash balance unavailable.",
     )
@@ -729,7 +745,7 @@ def compute_ladder_state(data: dataBlob) -> dict:
 
     check = collateral_check(state["nlv"], state["maint"], state["excess"])
     state["check"] = check
-    state["collateral_ok"] = (not check["usable"]) or check["fully_counted"]
+    state.update(collateral_flags(check))
 
     near_cash_total = base_cash + state["bills_mv"] + state["etf_mv"]
     state["rung"] = target_rung_size(near_cash_total, buffer, settings["ladder_months"])

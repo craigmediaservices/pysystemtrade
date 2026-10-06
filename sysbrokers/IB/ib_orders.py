@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 
+from ib_async import util as ib_util
 from ib_async import (
     Trade as ibTrade,
     OrderStatus as ibOrderStatus,
@@ -35,6 +36,9 @@ from syslogging.logger import *
 
 
 OPEN_ORDER_CACHE_SECONDS = 1.0
+EXECUTIONS_CACHE_SECONDS = 30.0
+EXECUTIONS_FAILURE_CACHE_SECONDS = 60.0
+EXECUTIONS_REQUEST_TIMEOUT_SECONDS = 20.0
 
 
 def ib_status_means_done_not_filled(status: str) -> bool:
@@ -97,6 +101,31 @@ def keys_for_db_broker_order(broker_order: brokerOrder) -> set:
 
 def keys_for_ib_trade(ib_trade: ibTrade) -> set:
     return open_order_keys_from_ib_trades([ib_trade])
+
+
+def order_keys_from_ib_fills(list_of_ib_fills: list) -> set:
+    """
+    The same identity keys for the orders behind a list of ib_async fills
+    (executions), so we can tell whether IB has reported any execution for
+    an order. Pure function, unit-tested.
+    """
+    keys = set()
+    for fill in list_of_ib_fills:
+        execution = fill.execution
+        perm_id = int(getattr(execution, "permId", 0) or 0)
+        if perm_id:
+            keys.add(("perm", perm_id))
+        keys.add(("temp", int(execution.clientId), int(execution.orderId)))
+
+    return keys
+
+
+def order_submitted_today(broker_order: brokerOrder, now: datetime.datetime) -> bool:
+    submit_datetime = broker_order.submit_datetime
+    if not isinstance(submit_datetime, datetime.datetime):
+        return False
+
+    return submit_datetime.date() == now.date()
 
 
 def contract_for_instrument_lookup(contract_with_legs) -> ibContract:
@@ -564,6 +593,103 @@ class ibExecutionStackData(brokerExecutionStackData):
         keys = keys_for_db_broker_order(broker_order)
 
         return self._any_key_open_at_broker(keys)
+
+    def check_unfilled_order_is_gone_from_broker(
+        self, broker_order: brokerOrder
+    ) -> bool:
+        """
+        For a (database) broker order we can no longer match to an IB trade:
+        is it confirmed gone from the broker without having filled? False
+        whenever in doubt. True only if all of:
+        - it was submitted today: IB only reports today's executions, so an
+          older order is left to the end-of-day clean-up;
+        - we know its ids and none is in a fresh open-order list (the same
+          authoritative check as cancel-and-confirm);
+        - no execution carries its ids, in the session's fill cache NOR in a
+          fresh reqExecutions. The cache alone is not enough: it is filled
+          by ib_async's startup sync, which has timed out in production
+          (2026-09-23, 2026-10-05) leaving it empty - exactly when an order
+          is unmatched. A failed, timed-out or empty reply counts as doubt
+          (ib_async answers an errored request with an empty list).
+        """
+        if not order_submitted_today(broker_order, datetime.datetime.now()):
+            return False
+
+        keys = keys_for_db_broker_order(broker_order)
+        if len(keys) == 0:
+            return False
+
+        if self._any_key_open_at_broker(keys):
+            return False
+
+        session_keys = order_keys_from_ib_fills(self.ib_client.ib.fills())
+        if len(keys.intersection(session_keys)) > 0:
+            return False
+
+        todays_keys = self.get_keys_of_todays_executed_orders_from_broker()
+        if todays_keys is None:
+            return False
+        if len(keys.intersection(todays_keys)) > 0:
+            return False
+
+        return True
+
+    def get_keys_of_todays_executed_orders_from_broker(self):
+        """
+        Identity keys of every order with an execution today (all clients),
+        from a fresh reqExecutions, or None if IB did not give a usable
+        answer (error, timeout, empty reply).
+
+        Both outcomes are cached: an answer for EXECUTIONS_CACHE_SECONDS, a
+        failure for EXECUTIONS_FAILURE_CACHE_SECONDS, so a stalled IB costs at
+        most one timeout a minute rather than one per unmatched order per
+        pass (2026-10-05: IB's executions request stalled). The request has
+        its own, shorter timeout (EXECUTIONS_REQUEST_TIMEOUT_SECONDS, or the
+        connection's if that is shorter). Unlike reqAllOpenOrders, each
+        reqExecutions has its own request id, so a late reply cannot resolve
+        a later request: a timeout is not fatal.
+        """
+        now = datetime.datetime.now()
+        cached = getattr(self, "_executions_keys_cache", None)
+        if cached is not None:
+            cache_time, keys, cache_seconds = cached
+            if (now - cache_time).total_seconds() < cache_seconds:
+                return keys
+
+        try:
+            list_of_ib_fills = self._request_todays_executions()
+        except Exception as e:
+            self.log.warning(
+                "Could not get today's executions from IB (%s): not treating "
+                "any unmatched broker order as gone unfilled for %d seconds"
+                % (repr(e), EXECUTIONS_FAILURE_CACHE_SECONDS)
+            )
+            list_of_ib_fills = None
+
+        if not list_of_ib_fills:
+            # failed, nothing at all, or an errored request: can't tell which
+            self._executions_keys_cache = (
+                now,
+                None,
+                EXECUTIONS_FAILURE_CACHE_SECONDS,
+            )
+            return None
+
+        keys = order_keys_from_ib_fills(list_of_ib_fills)
+        self._executions_keys_cache = (now, keys, EXECUTIONS_CACHE_SECONDS)
+
+        return keys
+
+    def _request_todays_executions(self) -> list:
+        # what ib.reqExecutions() does (util.run with the connection's
+        # RequestTimeout), with our shorter timeout
+        ib = self.ib_client.ib
+        timeout = EXECUTIONS_REQUEST_TIMEOUT_SECONDS
+        connection_timeout = getattr(ib, "RequestTimeout", 0)
+        if isinstance(connection_timeout, (int, float)) and connection_timeout > 0:
+            timeout = min(timeout, float(connection_timeout))
+
+        return ib_util.run(ib.reqExecutionsAsync(), timeout=timeout)
 
     def _any_key_open_at_broker(self, keys: set) -> bool:
         if len(keys) == 0:
