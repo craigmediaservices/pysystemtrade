@@ -5,8 +5,12 @@ that never filled, the broker layer says so at the start of algo_comment
 the database broker order. Our own cancels (algo timeouts, end-of-day:
 202 with an empty reason) and a refused modification of a working order
 (the 2026-09-16 Eurex spread) are not rejects.
+
+The reason strings below are the real ones from the archived stack handler
+logs (2026-09-01..10-05), including the trailing-quote variants.
 """
 import datetime
+from unittest import mock
 
 import pytest
 from ib_async import (
@@ -18,6 +22,7 @@ from ib_async import (
 )
 
 from sysbrokers.IB.ib_contracts import ibcontractWithLegs
+from sysbrokers.IB import ib_translate_broker_order_objects as ib_translate
 from sysbrokers.IB.ib_translate_broker_order_objects import (
     extract_trade_info,
     ib_error_reason,
@@ -38,15 +43,22 @@ PRICE_LIMITS = (
     "Order price is outside price limits"
 )
 OUR_CANCEL = "Error 202, reqId 373298: Order Canceled - reason:"
-NO_PERMISSION = (
-    "Error 201, reqId 373298: Order rejected - reason:"
-    "YOUR ACCOUNT IS NOT ELIGIBLE TO TRADE THIS PRODUCT"
-)
+
+
+def _rejected(reason):
+    return "Error 201, reqId 373298: Order rejected - reason:%s" % reason
+
+
+def _cancelled(reason):
+    return "Error 202, reqId 373298: Order Canceled - reason:%s" % reason
+
+
+NO_PERMISSION = _rejected("No Trading Permission")
 NOT_ALLOWED = (
     "Error 203, reqId 373298: The security <FUT> is not available or "
     "allowed for this account."
 )
-DUPLICATE_ID = "Error 201, reqId 373298: Order rejected - reason:Duplicate ID"
+DUPLICATE_ID = _rejected("Duplicate ID")
 
 
 def _ib_trade(log_entries, status="Cancelled", filled=0.0):
@@ -80,11 +92,72 @@ def test_ib_cancel_with_a_reason_is_a_reject():
     )
 
 
-@pytest.mark.parametrize("message,code", [(NO_PERMISSION, 201), (NOT_ALLOWED, 203)])
-def test_new_order_refused_is_a_reject(message, code):
+@pytest.mark.parametrize(
+    "message,code",
+    [
+        (_rejected("No Trading Permission"), 201),
+        (_rejected("Invalid Price"), 201),
+        (_rejected("Invalid Price'"), 201),
+        (_cancelled("Order price is outside price limits."), 202),
+        (NOT_ALLOWED, 203),
+    ],
+)
+def test_broker_refusals_are_rejects(message, code):
     reject = ib_reject_from_trade(_ib_trade([(message, code)], status="Inactive"))
     assert reject is not None
     assert reject[0] == code
+
+
+@pytest.mark.parametrize(
+    "message,code",
+    [
+        (_rejected("Duplicate ID"), 201),
+        (_rejected("Duplicate ID'"), 201),
+        (_rejected("Order has been cancelled already"), 201),
+        (_rejected("Order is already filled"), 201),
+        (_rejected("Prior submit/modify was rejected"), 201),
+        (_cancelled(""), 202),
+    ],
+)
+def test_follow_ons_and_our_own_cancels_are_not_rejects(message, code):
+    assert ib_reject_from_trade(_ib_trade([(message, code)])) is None
+
+
+@pytest.mark.parametrize("reason", ["Invalid Price", "Invalid Price'"])
+def test_invalid_price_after_a_modify_is_not_a_reject(reason):
+    trade = _ib_trade([("Modify", 0), (_rejected(reason), 201)])
+    assert ib_reject_from_trade(trade) is None
+
+
+def test_algo_timeout_on_an_already_dead_order_is_not_a_reject():
+    # we cancel after the timeout, IB: 202 (no reason) and/or 201 'Order has
+    # been cancelled already'. Three of these must not block a contract order
+    trade = _ib_trade(
+        [
+            (_cancelled(""), 202),
+            (_rejected("Order has been cancelled already"), 201),
+        ]
+    )
+    assert ib_reject_from_trade(trade) is None
+
+
+def test_unknown_201_reason_does_not_count_and_is_logged_once():
+    logger = mock.MagicMock()
+    with mock.patch.object(ib_translate, "get_logger", return_value=logger):
+        with mock.patch.object(ib_translate, "_unknown_201_reasons_logged", set()):
+            for _ in range(3):
+                trade = _ib_trade([(_rejected("Something New"), 201)])
+                assert ib_reject_from_trade(trade) is None
+    logger.warning.assert_called_once()
+    assert "Something New" in str(logger.warning.call_args)
+
+
+def test_known_201_follow_ons_are_not_logged_as_unknown():
+    logger = mock.MagicMock()
+    with mock.patch.object(ib_translate, "get_logger", return_value=logger):
+        with mock.patch.object(ib_translate, "_unknown_201_reasons_logged", set()):
+            ib_reject_from_trade(_ib_trade([(_rejected("Duplicate ID'"), 201)]))
+    logger.warning.assert_not_called()
 
 
 def test_our_own_cancel_is_not_a_reject():

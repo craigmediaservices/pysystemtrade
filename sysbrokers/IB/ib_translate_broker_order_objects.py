@@ -10,6 +10,7 @@ from sysbrokers.IB.ib_contracts import ibcontractWithLegs, ibContract
 from sysbrokers.broker_trade import brokerTrade
 from syscore.exceptions import missingData
 from syscore.constants import arg_not_supplied
+from syslogging.logger import get_logger
 from sysexecution.orders.named_order_objects import missing_order
 from sysexecution.orders.base_orders import resolve_multi_leg_price_to_single_price
 
@@ -317,20 +318,39 @@ def extract_totals_from_fill_data_for_contract_id(list_of_fills_for_contractid):
     )
 
 
-# IB error codes meaning the broker refused the order outright
-# (https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/#api-error-codes):
-#   201 Order rejected - reason: ... (e.g. no trading permission, margin)
+# How an order that never filled ended, from the IB error codes in its
+# ib_async trade log. Explicit rules, checked against every 201/202 in the
+# archived stack handler logs (2026-09-01..10-05):
+#   201 Order rejected - reason: <reason>. Counts ONLY for reasons that refuse
+#       a submission: "No Trading Permission" (x254), and "Invalid Price"
+#       (x114) unless it follows a Modify. NOT: "Duplicate ID" (x243, a
+#       refused modification), "Order has been cancelled already" (x39, IB's
+#       reply to our cancel of an order that is already dead, e.g. after an
+#       algo timeout), "Order is already filled" (x9), "Prior submit/modify
+#       was rejected" (x2), or any reason not listed (logged once).
+#   202 Order cancelled - reason: <reason>. Counts with a reason (e.g. "Order
+#       price is outside price limits." x40, the R1000 loop); with an empty
+#       reason (x17) it is IB confirming OUR cancel.
 #   203 The security is not available or allowed for this account
-IB_ORDER_REJECTED_CODES = (201, 203)
-# 202 Order cancelled - reason: ... is IB's answer to OUR cancels too (algo
-# timeouts, end-of-day), with an empty reason; with a reason (e.g. "Order
-# price is outside price limits") IB cancelled the order itself.
+#       (https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/#api-error-codes)
+IB_ORDER_REJECTED_CODE = 201
 IB_ORDER_CANCELLED_CODE = 202
+IB_SECURITY_NOT_ALLOWED_CODE = 203
+IB_SUBMISSION_REFUSED_REASONS = ("no trading permission",)
+IB_SUBMISSION_REFUSED_REASONS_UNLESS_MODIFIED = ("invalid price",)
+IB_NOT_A_REJECT_REASONS = (
+    "duplicate id",
+    "order has been cancelled already",
+    "order is already filled",
+    "prior submit/modify was rejected",
+)
 IB_MODIFY_LOG_MESSAGE = "Modify"  # ib_async's log entry for a modification
 
 _IB_ERROR_PREFIX = re.compile(r"^(Error|Warning) -?\d+, reqId -?\d+: ")
 _IB_REASON = re.compile(r"reason:(.*)$", re.IGNORECASE | re.DOTALL)
 _IB_CONTRACT_SUFFIX = re.compile(r", contract: .*$", re.DOTALL)
+
+_unknown_201_reasons_logged = set()
 
 
 def ib_error_reason(message: str) -> str:
@@ -348,15 +368,46 @@ def ib_error_reason(message: str) -> str:
     return _IB_ERROR_PREFIX.sub("", message).strip()
 
 
+def normalise_ib_reason(reason: str) -> str:
+    """'Invalid Price\'' / ' invalid price. ' -> 'invalid price'"""
+    return str(reason or "").strip().strip("'\"").strip().rstrip(".").lower()
+
+
+def _log_unknown_201_reason_once(reason: str):
+    key = normalise_ib_reason(reason)
+    if key in _unknown_201_reasons_logged:
+        return
+    _unknown_201_reasons_logged.add(key)
+    get_logger("ibRejectClassification").warning(
+        "IB error 201 with a reason not classified as reject or not: '%s' "
+        "(not counted as a broker reject; add it to the lists in "
+        "ib_translate_broker_order_objects.py)" % reason
+    )
+
+
+def _log_entry_is_broker_reject(error_code: int, reason: str, modified: bool):
+    normalised = normalise_ib_reason(reason)
+    if error_code == IB_ORDER_REJECTED_CODE:
+        if normalised in IB_SUBMISSION_REFUSED_REASONS:
+            return True
+        if normalised in IB_SUBMISSION_REFUSED_REASONS_UNLESS_MODIFIED:
+            return not modified
+        if normalised not in IB_NOT_A_REJECT_REASONS:
+            _log_unknown_201_reason_once(reason)
+        return False
+
+    if error_code == IB_ORDER_CANCELLED_CODE:
+        return len(normalised) > 0
+
+    return error_code == IB_SECURITY_NOT_ALLOWED_CODE
+
+
 def ib_reject_from_trade(trade: ibTrade):
     """
     (error code, reason) if the broker refused or killed this order without
-    any fill, else None. Only says WHY an order ended; whether it is really
-    gone is still decided from the open-order list (see ib_orders.py).
-
-    Not a reject: our own cancels (202 with an empty reason), warnings, and a
-    201 that follows a modification - IB refusing a modify of a WORKING
-    order, which ib_async also logs as 'Cancelled' (2026-09-16 Eurex spread).
+    any fill, else None (rules above). Only says WHY an order ended; whether
+    it is really gone is still decided from the open-order list (see
+    ib_orders.py).
     """
     status = trade.orderStatus
     done_not_filled = (
@@ -375,12 +426,10 @@ def ib_reject_from_trade(trade: ibTrade):
             modified = True
             continue
         error_code = int(log_entry.errorCode or 0)
+        if error_code == 0:
+            continue
         reason = ib_error_reason(log_entry.message)
-        if error_code in IB_ORDER_REJECTED_CODES:
-            if modified and error_code == 201:
-                continue
-            reject = (error_code, reason)
-        elif error_code == IB_ORDER_CANCELLED_CODE and len(reason) > 0:
+        if _log_entry_is_broker_reject(error_code, reason, modified):
             reject = (error_code, reason)
 
     return reject
