@@ -99,6 +99,23 @@ def keys_for_ib_trade(ib_trade: ibTrade) -> set:
     return open_order_keys_from_ib_trades([ib_trade])
 
 
+def order_keys_from_ib_fills(list_of_ib_fills: list) -> set:
+    """
+    The same identity keys for the orders behind a list of ib_async fills
+    (executions), so we can tell whether IB has reported any execution for
+    an order. Pure function, unit-tested.
+    """
+    keys = set()
+    for fill in list_of_ib_fills:
+        execution = fill.execution
+        perm_id = int(getattr(execution, "permId", 0) or 0)
+        if perm_id:
+            keys.add(("perm", perm_id))
+        keys.add(("temp", int(execution.clientId), int(execution.orderId)))
+
+    return keys
+
+
 def contract_for_instrument_lookup(contract_with_legs) -> ibContract:
     """
     Which IB contract to identify the instrument from. A combo (BAG) has no
@@ -564,6 +581,29 @@ class ibExecutionStackData(brokerExecutionStackData):
         keys = keys_for_db_broker_order(broker_order)
 
         return self._any_key_open_at_broker(keys)
+
+    def check_unfilled_order_is_gone_from_broker(
+        self, broker_order: brokerOrder
+    ) -> bool:
+        """
+        For a (database) broker order we can no longer match to an IB trade:
+        is it confirmed gone from the broker without having filled? Only
+        True if we know its ids, it is not in a fresh open-order list (the
+        same authoritative check as cancel-and-confirm), and no execution IB
+        has reported to this session carries its ids. False when in doubt.
+        """
+        keys = keys_for_db_broker_order(broker_order)
+        if len(keys) == 0:
+            return False
+
+        if self._any_key_open_at_broker(keys):
+            return False
+
+        executed_keys = order_keys_from_ib_fills(self.ib_client.ib.fills())
+        if len(keys.intersection(executed_keys)) > 0:
+            return False
+
+        return True
 
     def _any_key_open_at_broker(self, keys: set) -> bool:
         if len(keys) == 0:
