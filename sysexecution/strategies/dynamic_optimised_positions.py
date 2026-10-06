@@ -60,13 +60,89 @@ from systems.provided.dynamic_small_system_optimise.optimised_positions_stage im
 
 ARBITRARILY_LARGE_CONTRACT_LIMIT = 999999999
 
+# Freshness guard (2026-10-06). The order generator runs on its own timer
+# (03:30, 11:30) and does not know whether run_systems (02:05, 10:05, ~45-65
+# min) has finished writing raw optimal positions. run_systems rewrites EVERY
+# instrument it has a raw position for on each run (system instruments plus
+# any with an existing position, the latter at zero), each with date=now, so
+# the oldest per-instrument date tells us whether the latest run completed.
+# On the current schedule a completed run's positions are < ~1.5h old when
+# the generator looks; the previous run's are >= ~8h old (480 min timer).
+# 6h sits between the two. Override with config element
+# max_age_hours_raw_optimal_positions.
+MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS = 6.0
+
+
+def why_raw_optimal_positions_are_stale(
+    raw_optimal_position_data: dict, now: datetime.datetime, max_age_hours: float
+) -> str:
+    """
+    Pure. "" if every raw optimal position is younger than max_age_hours,
+    otherwise a reason not to trade on them. A mix of fresh and old dates
+    means run_systems is still writing (or died part-way).
+    """
+    if len(raw_optimal_position_data) == 0:
+        return "no raw optimal positions at all"
+
+    cutoff = now - datetime.timedelta(hours=max_age_hours)
+    dates = {
+        instrument_code: getattr(entry, "date", None)
+        for instrument_code, entry in raw_optimal_position_data.items()
+    }
+    stale = sorted(
+        instrument_code
+        for instrument_code, date in dates.items()
+        if date is None or date < cutoff
+    )
+    if len(stale) == 0:
+        return ""
+
+    dated = [date for date in dates.values() if date is not None]
+    oldest = str(min(dated)) if dated else "undated"
+    return (
+        "%d of %d raw optimal positions are older than %.1f hours (oldest %s; "
+        "e.g. %s): run_systems has not finished writing positions"
+        % (
+            len(stale),
+            len(dates),
+            max_age_hours,
+            oldest,
+            ", ".join(stale[:5]),
+        )
+    )
+
 
 class orderGeneratorForDynamicPositions(orderGeneratorForStrategy):
+    @property
+    def max_age_hours_raw_optimal_positions(self) -> float:
+        return float(
+            self.data.config.get_element_or_default(
+                "max_age_hours_raw_optimal_positions",
+                MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS,
+            )
+        )
+
     def get_required_orders(self) -> listOfOrders:
         strategy_name = self.strategy_name
 
+        raw_optimal_position_data = self.get_raw_optimal_position_data()
+        stale_reason = why_raw_optimal_positions_are_stale(
+            raw_optimal_position_data,
+            now=datetime.datetime.now(),
+            max_age_hours=self.max_age_hours_raw_optimal_positions,
+        )
+        if stale_reason:
+            # critical log will send email; trading on stale or half-written
+            # positions is worse than missing one pass
+            self.log.critical(
+                "%s: NOT generating orders this run: %s" % (strategy_name, stale_reason)
+            )
+            return listOfOrders([])
+
         optimised_positions_data = (
-            self.calculate_write_and_return_optimised_positions_data()
+            self.calculate_write_and_return_optimised_positions_data(
+                raw_optimal_position_data=raw_optimal_position_data
+            )
         )
         current_positions = self.get_actual_positions_for_strategy()
 
@@ -79,10 +155,13 @@ class orderGeneratorForDynamicPositions(orderGeneratorForStrategy):
 
         return list_of_trades
 
-    def calculate_write_and_return_optimised_positions_data(self) -> dict:
+    def calculate_write_and_return_optimised_positions_data(
+        self, raw_optimal_position_data: dict = None
+    ) -> dict:
         ## We bring in
         previous_positions = self.get_actual_positions_for_strategy()
-        raw_optimal_position_data = self.get_raw_optimal_position_data()
+        if raw_optimal_position_data is None:
+            raw_optimal_position_data = self.get_raw_optimal_position_data()
 
         data = self.data
         strategy_name = self.strategy_name
