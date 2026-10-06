@@ -8,7 +8,9 @@ YYYY-MM") into a concrete, priced order:
                         yield)  JOIN  the US-T bill universe IB will trade
   2. pick the month   = first ladder gap, else extend the ladder
   3. pick the bill    = best implied yield in that month (IB ask if quoted,
-                        else the auction yield); ties go to the later maturity
+                        else the auction yield); bills within TIE_BREAK_BP of
+                        the best go to the tightest bid-ask spread (easier to
+                        fill an odd lot), then the later maturity
   4. limit price      = IB ask, but never above the price implied by
                         (auction yield - tolerance): the "yield floor"
   5. size             = deployable cash rounded down, in whole $1,000 units
@@ -17,9 +19,9 @@ Everything above the IB helper section is pure and unit tested. The IB
 helpers (quotes, what-if, place, wait) are thin wrappers around ib_async and
 are only exercised by the interactive tool.
 
-Nothing in this module places an order on import; `place_limit_buy` is the
-single function that trades and the interactive tool only calls it after an
-explicit y/n.
+Nothing in this module places an order on import. `place_limit_buy` and
+`modify_limit` (re-price a working order) are the functions that trade, and
+the interactive tool only calls them after an explicit answer from the user.
 """
 
 import datetime
@@ -50,9 +52,13 @@ IB_BILL_CURRENCY = "USD"
 DEFAULT_YIELD_TOLERANCE_PCT = 0.15  # accept up to this much below auction yield
 DEFAULT_MONTH_SLACK_DAYS = 15  # if no bill matures IN the month, look this far out
 DEFAULT_QUOTE_WAIT_SECONDS = 5
-DEFAULT_FILL_WAIT_SECONDS = 60
+DEFAULT_FILL_WAIT_SECONDS = 30  # odd lots fill on arrival or not at all
 DEFAULT_LIMIT_PAD = 0.005  # paid above the ask (per 100) so odd lots fill in one go
+DEFAULT_REPRICE_STEP = 0.005  # one "raise the limit" step after a no-fill, per 100
 PRICE_DECIMALS = 5  # IB minTick for bills is 1e-05
+# yields this close to the best count as a tie, settled by the tighter spread.
+# 2bp on $150K over ~5 months is ~$12: cheap insurance against a stuck order.
+TIE_BREAK_BP = 2.0
 
 CANDIDATE_COLUMNS = ["cusip", "maturity", "days", "term", "auction_yield_pct", "conId"]
 
@@ -70,9 +76,11 @@ def get_purchase_settings(data: dataBlob) -> dict:
       tbill_yield_tolerance_pct  max shortfall vs auction yield accepted (0.15)
       tbill_month_slack_days     days outside the target month to search (15)
       tbill_quote_wait_seconds   how long to wait for an IB quote (5)
-      tbill_fill_wait_seconds    how long to wait for a fill after placing (60)
+      tbill_fill_wait_seconds    how long to wait for a fill after placing (30)
       tbill_limit_pad            price pad above the IB ask, per 100 (0.005);
                                  still capped by the yield floor
+      tbill_reprice_step         raise per "raise the limit" after a no-fill,
+                                 per 100 (0.005); still capped by the floor
     """
     return dict(
         yield_tolerance_pct=float(
@@ -90,6 +98,9 @@ def get_purchase_settings(data: dataBlob) -> dict:
             _config_value(data, "tbill_fill_wait_seconds", DEFAULT_FILL_WAIT_SECONDS)
         ),
         limit_pad=float(_config_value(data, "tbill_limit_pad", DEFAULT_LIMIT_PAD)),
+        reprice_step=float(
+            _config_value(data, "tbill_reprice_step", DEFAULT_REPRICE_STEP)
+        ),
     )
 
 
@@ -255,15 +266,35 @@ def implied_yield_for_row(ask, days):
     return approx_bill_yield_pct(ask, days)
 
 
-def choose_bill(cands: pd.DataFrame):
+def spread_bp(bid, ask, days):
+    """
+    Bid-ask spread in basis points of yield (bid yield - ask yield). A tighter
+    spread is the best cheap sign that an odd lot will find a seller; IB's
+    displayed size is a dealer block in the millions and says nothing about
+    a $150K order. NaN unless both sides are quoted.
+    """
+    try:
+        bid, ask = float(bid), float(ask)
+    except BaseException:
+        return np.nan
+    if bid != bid or ask != ask or bid <= 0 or ask <= 0 or ask < bid:
+        return np.nan
+    return round(
+        (approx_bill_yield_pct(bid, days) - approx_bill_yield_pct(ask, days)) * 100.0,
+        2,
+    )
+
+
+def choose_bill_with_reason(cands: pd.DataFrame, tie_bp: float = TIE_BREAK_BP):
     """
     Pick the candidate with the best yield: IB-ask-implied yield when quoted,
-    else the auction yield. Ties (within 0.005%) go to the later maturity.
-    Returns the index label of the chosen row, or None if empty.
+    else the auction yield. Candidates within `tie_bp` of the best yield are
+    a tie, settled by the tighter bid-ask spread (a quoted spread beats none),
+    then the later maturity. Returns (index label, reason); (None, "") if empty.
     """
     if len(cands) == 0:
-        return None
-    scores = []
+        return None, ""
+    rows = []
     for idx, row in cands.iterrows():
         ask = row.get("ask", np.nan)
         score = approx_bill_yield_pct(ask, row["days"]) if ask == ask else np.nan
@@ -271,9 +302,81 @@ def choose_bill(cands: pd.DataFrame):
             score = row.get("auction_yield_pct", np.nan)
         if score != score:
             score = -np.inf
-        scores.append((round(float(score), 3), row["maturity"], idx))
-    scores.sort(key=lambda t: (t[0], t[1]))
-    return scores[-1][2]
+        spread = spread_bp(row.get("bid", np.nan), ask, row["days"])
+        rows.append((round(float(score), 3), spread, row["maturity"], idx))
+
+    best_score = max(r[0] for r in rows)
+    by_yield = sorted(rows, key=lambda r: (r[0], r[2]))[-1]
+    ties = [r for r in rows if r[0] >= best_score - tie_bp / 100.0]
+    quoted = [r for r in ties if r[1] == r[1]]
+    if not quoted or len(ties) == 1:
+        return by_yield[3], "best yield"
+    # tightest spread, then higher yield, then later maturity
+    pick = sorted(quoted, key=lambda r: (-r[1], r[0], r[2]))[-1]
+    if pick[3] == by_yield[3]:
+        return pick[3], "best yield, and tightest spread among bills within %gbp" % (
+            tie_bp
+        )
+    return pick[3], (
+        "tightest spread (%.2fbp) among bills within %gbp of the best yield; "
+        "gives up %.1fbp vs row %s"
+        % (pick[1], tie_bp, (best_score - pick[0]) * 100, by_yield[3])
+    )
+
+
+def choose_bill(cands: pd.DataFrame, tie_bp: float = TIE_BREAK_BP):
+    """Index label of the bill choose_bill_with_reason picks, or None if empty."""
+    return choose_bill_with_reason(cands, tie_bp)[0]
+
+
+def next_limit_step(
+    current_limit, auction_yield_pct, days, tolerance_pct: float, step: float
+):
+    """
+    One "raise the limit" step for an unfilled order: current limit + step,
+    still capped by the yield floor. Returns (price, reason); NaN price if the
+    order is already at the floor (or the step is not positive).
+    """
+    try:
+        if float(step) <= 0:
+            return np.nan, "reprice step is not positive"
+    except BaseException:
+        return np.nan, "no reprice step"
+    price, reason = limit_price_with_floor(
+        current_limit, auction_yield_pct, days, tolerance_pct, pad=step
+    )
+    if price != price or price <= float(current_limit) + 10**-PRICE_DECIMALS / 2:
+        return np.nan, "already at the yield floor"
+    return price, reason
+
+
+def what_if_problem(w) -> str:
+    """
+    Why IB's what-if says this order cannot go through, or "" if it looks fine.
+    A rejected preview (e.g. Error 460, no trading permission) comes back with
+    no margin change at all: placing it would only be rejected again.
+    """
+    if not w:
+        return "IB returned no what-if result"
+    text = str(w.get("warningText") or "")
+    if "permission" in text.lower():
+        return "IB says: %s" % text
+
+    def _missing(v):
+        if v is None:
+            return True
+        try:
+            v = float(v)
+        except BaseException:
+            return True
+        return v != v or abs(v) > 1e300
+
+    if _missing(w.get("initMarginChange")) and _missing(w.get("maintMarginChange")):
+        return (
+            "IB could not preview the order (no margin change returned); this is "
+            "what a missing trading permission looks like (Error 460)"
+        )
+    return ""
 
 
 def order_cost(units: int, price) -> float:
@@ -449,15 +552,28 @@ def what_if_buy(ib, contract, units: int, price: float, account: str) -> dict:
 
 
 def place_limit_buy(ib, contract, units: int, price: float, account: str, tif="DAY"):
-    """THE ONLY FUNCTION HERE THAT TRADES. Returns the ib_async Trade."""
+    """TRADES: places a new limit buy. Returns the ib_async Trade."""
     order = _limit_buy_order(units, price, account, tif=tif)
     return ib.placeOrder(contract, order)
 
 
-def wait_for_fill(ib, trade, wait_seconds: float = DEFAULT_FILL_WAIT_SECONDS) -> dict:
-    deadline = time.time() + wait_seconds
-    while time.time() < deadline and not trade.isDone():
-        ib.sleep(2)
+def modify_limit(ib, trade, new_price: float):
+    """TRADES: re-sends the same working order with a new limit price."""
+    trade.order.lmtPrice = round(float(new_price), PRICE_DECIMALS)
+    return ib.placeOrder(trade.contract, trade.order)
+
+
+def cancel_and_wait(ib, trade, wait_seconds: float = 15.0) -> dict:
+    """Cancel a working order and wait for IB to confirm; returns final status."""
+    if not trade.isDone():
+        ib.cancelOrder(trade.order)
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline and not trade.isDone():
+            ib.sleep(1)
+    return order_result(trade)
+
+
+def order_result(trade) -> dict:
     status = trade.orderStatus
     return dict(
         order_id=trade.order.orderId,
@@ -467,3 +583,10 @@ def wait_for_fill(ib, trade, wait_seconds: float = DEFAULT_FILL_WAIT_SECONDS) ->
         avg_fill_price=status.avgFillPrice,
         done=trade.isDone(),
     )
+
+
+def wait_for_fill(ib, trade, wait_seconds: float = DEFAULT_FILL_WAIT_SECONDS) -> dict:
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline and not trade.isDone():
+        ib.sleep(2)
+    return order_result(trade)
