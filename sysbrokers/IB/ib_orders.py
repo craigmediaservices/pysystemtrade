@@ -35,6 +35,7 @@ from syslogging.logger import *
 
 
 OPEN_ORDER_CACHE_SECONDS = 1.0
+EXECUTIONS_CACHE_SECONDS = 30.0
 
 
 def ib_status_means_done_not_filled(status: str) -> bool:
@@ -114,6 +115,14 @@ def order_keys_from_ib_fills(list_of_ib_fills: list) -> set:
         keys.add(("temp", int(execution.clientId), int(execution.orderId)))
 
     return keys
+
+
+def order_submitted_today(broker_order: brokerOrder, now: datetime.datetime) -> bool:
+    submit_datetime = broker_order.submit_datetime
+    if not isinstance(submit_datetime, datetime.datetime):
+        return False
+
+    return submit_datetime.date() == now.date()
 
 
 def contract_for_instrument_lookup(contract_with_legs) -> ibContract:
@@ -587,11 +596,22 @@ class ibExecutionStackData(brokerExecutionStackData):
     ) -> bool:
         """
         For a (database) broker order we can no longer match to an IB trade:
-        is it confirmed gone from the broker without having filled? Only
-        True if we know its ids, it is not in a fresh open-order list (the
-        same authoritative check as cancel-and-confirm), and no execution IB
-        has reported to this session carries its ids. False when in doubt.
+        is it confirmed gone from the broker without having filled? False
+        whenever in doubt. True only if all of:
+        - it was submitted today: IB only reports today's executions, so an
+          older order is left to the end-of-day clean-up;
+        - we know its ids and none is in a fresh open-order list (the same
+          authoritative check as cancel-and-confirm);
+        - no execution carries its ids, in the session's fill cache NOR in a
+          fresh reqExecutions. The cache alone is not enough: it is filled
+          by ib_async's startup sync, which has timed out in production
+          (2026-09-23, 2026-10-05) leaving it empty - exactly when an order
+          is unmatched. A failed, timed-out or empty reply counts as doubt
+          (ib_async answers an errored request with an empty list).
         """
+        if not order_submitted_today(broker_order, datetime.datetime.now()):
+            return False
+
         keys = keys_for_db_broker_order(broker_order)
         if len(keys) == 0:
             return False
@@ -599,11 +619,50 @@ class ibExecutionStackData(brokerExecutionStackData):
         if self._any_key_open_at_broker(keys):
             return False
 
-        executed_keys = order_keys_from_ib_fills(self.ib_client.ib.fills())
-        if len(keys.intersection(executed_keys)) > 0:
+        session_keys = order_keys_from_ib_fills(self.ib_client.ib.fills())
+        if len(keys.intersection(session_keys)) > 0:
+            return False
+
+        todays_keys = self.get_keys_of_todays_executed_orders_from_broker()
+        if todays_keys is None:
+            return False
+        if len(keys.intersection(todays_keys)) > 0:
             return False
 
         return True
+
+    def get_keys_of_todays_executed_orders_from_broker(self):
+        """
+        Identity keys of every order with an execution today, from a fresh
+        reqExecutions (subject to the connection's request timeout), cached
+        for EXECUTIONS_CACHE_SECONDS. None if IB did not give a usable answer.
+        Unlike reqAllOpenOrders, each reqExecutions has its own request id, so
+        a late reply cannot resolve a later request: a timeout is not fatal.
+        """
+        now = datetime.datetime.now()
+        cached = getattr(self, "_executions_keys_cache", None)
+        if cached is not None:
+            cache_time, keys = cached
+            if (now - cache_time).total_seconds() < EXECUTIONS_CACHE_SECONDS:
+                return keys
+
+        try:
+            list_of_ib_fills = self.ib_client.ib.reqExecutions()
+        except Exception as e:
+            self.log.warning(
+                "Could not get today's executions from IB (%s): not treating "
+                "any unmatched broker order as gone unfilled this time" % repr(e)
+            )
+            return None
+
+        if not list_of_ib_fills:
+            # nothing at all, or an errored request: can't tell which
+            return None
+
+        keys = order_keys_from_ib_fills(list_of_ib_fills)
+        self._executions_keys_cache = (now, keys)
+
+        return keys
 
     def _any_key_open_at_broker(self, keys: set) -> bool:
         if len(keys) == 0:
