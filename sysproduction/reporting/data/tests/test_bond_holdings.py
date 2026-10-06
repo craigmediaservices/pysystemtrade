@@ -359,3 +359,15 @@ def test_minimum_never_goes_below_the_rounding_increment():
     # a nonsense min_purchase must not re-enable sub-rounding tickets
     text = _action(5000.0, min_purchase=0.0, rounding=10000.0)
     assert text.startswith("ACTION: none")
+
+
+def test_collateral_flags_unusable_check_is_unverified_not_silent():
+    from sysproduction.reporting.data.bond_holdings import collateral_flags
+
+    # same inputs as test_collateral_check
+    ok = collateral_flags(collateral_check(1126344.0, 495536.0, 630808.0))
+    assert ok == dict(collateral_ok=True, collateral_unverified=False)
+    haircut = collateral_flags(collateral_check(1126344.0, 495536.0, 530808.0))
+    assert haircut == dict(collateral_ok=False, collateral_unverified=False)
+    unknown = collateral_flags(collateral_check(np.nan, 1.0, 1.0))
+    assert unknown["collateral_unverified"]
