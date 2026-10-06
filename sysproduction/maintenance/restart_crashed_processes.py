@@ -35,6 +35,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 from sysdata.data_blob import dataBlob
@@ -134,10 +135,19 @@ def load_alert_state() -> dict:
 
 
 def save_alert_state(alerts: dict):
-    tmp = ALERT_STATE_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(alerts, f, indent=1)
-    os.replace(tmp, ALERT_STATE_FILE)
+    # unique tmp in the same directory, so concurrent runs cannot clobber
+    # each other's half-written file before the atomic replace
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(ALERT_STATE_FILE), prefix=".restart_alerts.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(alerts, f, indent=1)
+        os.replace(tmp, ALERT_STATE_FILE)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def budget_is_spent(stamps: list, now: datetime.datetime) -> bool:
@@ -336,13 +346,22 @@ def restart_crashed_processes(dry_run: bool = False, operator: bool = False) -> 
                 restart_process(script)
                 restarted.append(name)
                 record_restart(history, name, now, operator)
+                if not operator:
+                    # charge the budget now, before anything else can fail
+                    save_restart_history(history)
+
+    # restart history first: it is what bounds restarts. The alert record
+    # only de-duplicates emails, so failing to save it must not stop anything
+    if restarted and not operator:
+        save_restart_history(history)
 
     if not dry_run and json.dumps(alerts, sort_keys=True) != alerts_before:
-        save_alert_state(alerts)
+        try:
+            save_alert_state(alerts)
+        except Exception as e:
+            print("   WARNING could not save alert state (%s): alerts may repeat" % e)
 
     if restarted:
-        if not operator:
-            save_restart_history(history)
         time.sleep(25)
         with dataBlob(log_name="Maintenance-Restart-Processes") as data:
             procs = dataControlProcess(data).get_dict_of_control_processes()
