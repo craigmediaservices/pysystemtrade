@@ -11,7 +11,7 @@ Roll_Adjusted preconditions (all must hold, else the instrument is skipped):
   * position in the priced contract == 0
   * no orphaned positions in other contracts
   * no UNFILLED order on the contract stack touching the priced contract
-  * no fill today that OPENED a position in the priced contract
+The contract stack is re-read for each instrument, just before its check.
 Force / Force_Outright / Close / No_Open are applied only if the tool lists
 them as allowable for the current state. --limit raises a 1-day trade limit.
 """
@@ -65,15 +65,16 @@ def _fills_today(do: dataOrders) -> dict:
     return out
 
 
-def apply_roll_adjusted(data, ic, stack, fills, dry_run):
+def apply_roll_adjusted(data, ic, dry_run):
     dp, dc = diagPositions(data), dataContracts(data)
+    # fresh for every instrument: the stack handler keeps running while we work
+    do = dataOrders(data)
+    stack = _stack_snapshot(do)
+    fills = _fills_today(do)
     rd = setup_roll_data_with_state_reporting(data, ic)
     priced = dc.get_priced_contract_id(ic)
     pos_priced = int(dp.get_position_for_contract(futuresContract(ic, priced)))
     unfilled_priced = [cd for cd, unf in stack.get(ic, []) if unf and priced in cd]
-    opened_priced_today = [
-        f for f in fills.get(ic, []) if f[0] == priced and pos_priced != 0
-    ]
     print(
         "\n=== %s: state=%s priced=%s pos_priced=%d orphans=%s unfilled_in_priced=%s fills_today=%s"
         % (
@@ -86,12 +87,7 @@ def apply_roll_adjusted(data, ic, stack, fills, dry_run):
             fills.get(ic),
         )
     )
-    if (
-        pos_priced != 0
-        or rd.has_orphaned_positions
-        or unfilled_priced
-        or opened_priced_today
-    ):
+    if pos_priced != 0 or rd.has_orphaned_positions or unfilled_priced:
         print("   SKIP - precondition failed")
         return False
     if "Roll_Adjusted" not in rd.allowable_roll_states_as_list_of_str:
@@ -164,12 +160,6 @@ def main():
     limits = _arg_list("--limit")
 
     with dataBlob(log_name="Interactive_Update-Roll-Status") as data:
-        do = dataOrders(data)
-        stack = _stack_snapshot(do)
-        fills = _fills_today(do)
-        print("fills today:", fills)
-        print("contract stack:", stack)
-
         for spec in limits:
             ic, n = spec.split(":")
             print("\ntrade limit %s (1 day) -> %s" % (ic, n))
@@ -180,7 +170,7 @@ def main():
 
         print("\n########## ROLL_ADJUSTED ##########")
         for ic in roll_adj:
-            apply_roll_adjusted(data, ic, stack, fills, dry_run)
+            apply_roll_adjusted(data, ic, dry_run)
 
         for state, names in plan:
             if not names:
