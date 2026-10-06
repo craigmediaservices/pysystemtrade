@@ -370,7 +370,9 @@ class brokerOrder(Order):
         )
         self.commission = matched_broker_order.commission
         self.broker_permid = matched_broker_order.broker_permid
-        self.algo_comment = matched_broker_order.algo_comment
+        self.algo_comment = merge_algo_comment(
+            self.algo_comment, matched_broker_order.algo_comment
+        )
         self.leg_filled_price = matched_broker_order.leg_filled_price
 
         return success
@@ -424,6 +426,37 @@ BROKER_REJECT_COMMENT_PREFIX = "IB reject "
 
 def broker_reject_comment(error_code: int, reason: str) -> str:
     return "%s%d: %s" % (BROKER_REJECT_COMMENT_PREFIX, int(error_code), reason)
+
+
+# start of the note left by brokerOrderStackData.complete_unfilled_order_gone_from_broker
+ZERO_FILL_COMPLETION_NOTE = "Unfilled and gone from broker:"
+
+
+def merge_algo_comment(existing_comment, comment_from_broker) -> str:
+    """
+    algo_comment is refreshed from the broker's view of the order on every
+    match. Keep what that view can no longer tell us: a broker reject tag at
+    the start (a trade rebuilt by ib_async after a restart has an empty log,
+    which would reset the reject count) and our zero-fill completion note at
+    the end.
+    """
+    existing = existing_comment if isinstance(existing_comment, str) else ""
+    merged = comment_from_broker if isinstance(comment_from_broker, str) else ""
+
+    if existing.startswith(BROKER_REJECT_COMMENT_PREFIX) and not merged.startswith(
+        BROKER_REJECT_COMMENT_PREFIX
+    ):
+        reject_tag = existing.split(" | ")[0]
+        merged = reject_tag if not merged else "%s | %s" % (reject_tag, merged)
+
+    if (
+        ZERO_FILL_COMPLETION_NOTE in existing
+        and ZERO_FILL_COMPLETION_NOTE not in merged
+    ):
+        note = existing[existing.index(ZERO_FILL_COMPLETION_NOTE) :]
+        merged = note if not merged else "%s | %s" % (merged, note)
+
+    return merged
 
 
 def broker_order_was_rejected_by_broker(broker_order: brokerOrder) -> bool:

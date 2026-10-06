@@ -3,7 +3,7 @@ from copy import copy
 
 from sysexecution.orders.named_order_objects import missing_order
 from sysexecution.order_stacks.order_stack import orderStackData, missingOrder
-from sysexecution.orders.broker_orders import brokerOrder
+from sysexecution.orders.broker_orders import brokerOrder, ZERO_FILL_COMPLETION_NOTE
 
 from sysexecution.tick_data import tickerObject
 
@@ -38,9 +38,9 @@ class brokerOrderStackData(orderStackData):
             self.log.warning(error_msg)
             raise missingOrder(error_msg)
 
-        note = (
-            "Unfilled and gone from broker: completed with zero fill, "
-            "original trade %s" % str(list(existing_order.trade))
+        note = "%s completed with zero fill, original trade %s" % (
+            ZERO_FILL_COMPLETION_NOTE,
+            str(list(existing_order.trade)),
         )
         comment = existing_order.algo_comment
         new_order = copy(existing_order)
