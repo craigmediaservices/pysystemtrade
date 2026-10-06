@@ -9,6 +9,8 @@ Desired virtual orders have to be labelled with the desired type: limit, market,
 """
 import datetime
 from copy import copy
+
+import pandas as pd
 from typing import List
 from dataclasses import dataclass
 
@@ -82,6 +84,14 @@ MAX_AGE_HOURS_RAW_OPTIMAL_POSITIONS = 20.0
 WARN_AGE_HOURS_RAW_OPTIMAL_POSITIONS = 6.0
 
 
+def _is_missing_date(date) -> bool:
+    # parquet/pandas give NaT (or NaN) for a missing date, not None
+    try:
+        return bool(pd.isna(date))
+    except (TypeError, ValueError):
+        return True
+
+
 def check_raw_optimal_positions(
     raw_optimal_position_data: dict,
     now: datetime.datetime,
@@ -99,7 +109,7 @@ def check_raw_optimal_positions(
         instrument_code: getattr(entry, "date", None)
         for instrument_code, entry in raw_optimal_position_data.items()
     }
-    undated = sorted(code for code, date in dates.items() if date is None)
+    undated = sorted(code for code, date in dates.items() if _is_missing_date(date))
     if undated:
         return "raw optimal positions without a date: %s" % ", ".join(undated), ""
 

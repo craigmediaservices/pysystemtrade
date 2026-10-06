@@ -186,3 +186,21 @@ def test_config_names_are_read():
         "max_age_hours_raw_optimal_positions": 20.0,
         "max_spread_minutes_raw_optimal_positions": 30.0,
     }
+
+
+# --- critic 2026-10-06: a missing date from parquet is NaT/NaN, not None -----
+
+
+def test_nat_date_blocks():
+    raw = {
+        code: SimpleNamespace(date=pd.Timestamp(e.date)) for code, e in FRESH.items()
+    }
+    raw["ODD"] = SimpleNamespace(date=pd.NaT)
+    block, _ = _check(raw)
+    assert "without a date" in block and "ODD" in block
+
+
+def test_nan_date_blocks():
+    raw = dict(FRESH, ODD=SimpleNamespace(date=float("nan")))
+    block, _ = _check(raw)
+    assert "without a date" in block and "ODD" in block
