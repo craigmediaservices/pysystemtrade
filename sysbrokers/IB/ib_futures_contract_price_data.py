@@ -18,6 +18,27 @@ from sysobjects.contracts import futuresContract, listOfFuturesContracts
 
 from syslogging.logger import *
 
+import numpy as np
+
+# IB sends this with size 0 when there is no quote (no subscription, delayed
+# data with nothing to show, market closed)
+IB_NO_QUOTE_PRICE = -1.0
+
+
+def price_or_nan_if_no_quote(price: float, size: float) -> float:
+    """
+    Passed through, IB's 'no quote' -1 becomes a limit price (a sell limit at -1
+    is marketable at any price) or a zero bid/ask spread in the sampled costs.
+    A genuine -1 (e.g. a calendar spread) comes with a non-zero size, so is kept.
+    """
+    if price is None:
+        return np.nan
+    no_size = size is None or np.isnan(size) or size <= 0
+    if price == IB_NO_QUOTE_PRICE and no_size:
+        return np.nan
+
+    return price
+
 
 class ibTickerObject(tickerObject):
     def __init__(self, ticker_with_BS: tickerWithBS, broker_client: ibPriceClient):
@@ -33,10 +54,10 @@ class ibTickerObject(tickerObject):
         self._broker_client.refresh()
 
     def bid(self):
-        return self.ticker.bid
+        return price_or_nan_if_no_quote(self.ticker.bid, self.ticker.bidSize)
 
     def ask(self):
-        return self.ticker.ask
+        return price_or_nan_if_no_quote(self.ticker.ask, self.ticker.askSize)
 
     def bid_size(self):
         return self.ticker.bidSize
